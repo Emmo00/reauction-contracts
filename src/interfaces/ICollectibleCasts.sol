@@ -2,7 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {IMetadata} from "./IMetadata.sol";
-import {IERC721} from "./IERC721.sol";
+import {IERC721} from "openzeppelin-contracts/contracts/token/ERC721/IERC721.sol";
 
 /**
  * @title ICollectibleCasts

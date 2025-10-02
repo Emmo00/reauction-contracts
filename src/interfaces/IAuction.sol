@@ -137,12 +137,7 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingCreated(
-        uint256 indexed listingId,
-        address indexed seller,
-        uint256 indexed tokenId,
-        uint256 price
-    );
+    event ListingCreated(uint256 indexed listingId, address indexed seller, uint256 indexed tokenId, uint256 price);
 
     /**
      * @notice Emitted when a listing is purchased
@@ -151,12 +146,7 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingPurchased(
-        uint256 indexed listingId,
-        address indexed buyer,
-        uint256 indexed tokenId,
-        uint256 price
-    );
+    event ListingPurchased(uint256 indexed listingId, address indexed buyer, uint256 indexed tokenId, uint256 price);
 
     /**
      * @notice Emitted when a listing is canceled
@@ -171,12 +161,7 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param endTime Auction end timestamp
      */
-    event AuctionStarted(
-        uint256 indexed auctionId,
-        address indexed creator,
-        uint256 indexed tokenId,
-        uint40 endTime
-    );
+    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint40 endTime);
 
     /**
      * @notice Emitted when a bid is placed
@@ -185,12 +170,7 @@ interface IAuction {
      * @param bidder Bidder's address
      * @param amount Bid amount in USDC
      */
-    event BidPlaced(
-        uint256 indexed auctionId,
-        uint256 indexed tokenId,
-        address indexed bidder,
-        uint256 amount
-    );
+    event BidPlaced(uint256 indexed auctionId, uint256 indexed tokenId, address indexed bidder, uint256 amount);
 
     /**
      * @notice Emitted when auction end time is extended
@@ -205,18 +185,12 @@ interface IAuction {
      * @param winner Winner's address
      * @param amount Winning bid amount in USDC
      */
-    event AuctionSettled(
-        uint256 indexed auctionId,
-        address indexed winner,
-        uint256 amount
-    );
+    event AuctionSettled(uint256 indexed auctionId, address indexed winner, uint256 amount);
 
     /**
      * @notice Emitted when an auction is cancelled
      */
-    event AuctionCancelled(
-        uint256 indexed auctionId,
-    );
+    event AuctionCancelled(uint256 indexed auctionId);
 
     /**
      * @notice Emitted when USDC is refunded to a previous bidder
@@ -224,11 +198,7 @@ interface IAuction {
      * @param to Address receiving refund
      * @param amount Amount refunded
      */
-    event BidRefunded(
-        uint256 indexed auctionId,
-        address indexed to,
-        uint256 amount
-    );
+    event BidRefunded(uint256 indexed auctionId, address indexed to, uint256 amount);
 
     /**
      * @notice Emitted when treasury address is updated
@@ -254,28 +224,21 @@ interface IAuction {
      * @return listingId Unique identifier for the created listing
      * @dev Caller must be the owner of the cast and have approved this contract.
      */
-    function createListing(
-        uint256 tokenId,
-        uint256 price
-    ) external returns (uint256);
+    function createListing(uint256 tokenId, uint256 price) external returns (uint256);
 
     /**
      * @notice Buy a fixed-price listing
      * @param listingId Unique identifier of the listing to purchase
      * @dev Caller must not be the seller. USDC approval required.
      */
-    function buyListing(
-        uint256 listingId
-    ) external;
+    function buyListing(uint256 listingId) external;
 
     /**
      * @notice Cancel an active listing
      * @param listingId Unique identifier of the listing to cancel
      * @dev Caller must be the seller. Cannot cancel if already purchased.
      */
-    function cancelListing(
-        uint256 listingId
-    ) external;
+    function cancelListing(uint256 listingId) external;
 
     /**
      * @notice Start a new auction for a collectible cast
@@ -283,9 +246,7 @@ interface IAuction {
      * @return auctionId Unique identifier for the created auction
      * @dev Caller must be the owner of the cast and have approved this contract.
      */
-    function startAuction(
-        uint256 tokenId
-    ) external returns (uint256);
+    function startAuction(uint256 tokenId) external returns (uint256);
 
     /**
      * @notice Place a bid on an active auction
@@ -293,10 +254,7 @@ interface IAuction {
      * @param amount Bid amount in USDC (6 decimals)
      * @dev Caller must not be the current highest bidder. USDC approval required.
      */
-    function placeBid(
-        uint256 auctionId,
-        uint256 amount
-    ) external;
+    function placeBid(uint256 auctionId, uint256 amount) external;
 
     /**
      * @notice Settle an ended auction, transferring the NFT to the winner
@@ -317,9 +275,7 @@ interface IAuction {
      * @param auctionId Auction identifier
      * @return Current state
      */
-    function auctionState(
-        uint256 auctionId
-    ) external view returns (AuctionState);
+    function auctionState(uint256 auctionId) external view returns (AuctionState);
 
     /**
      * @notice Get auction data with calculated state
@@ -327,9 +283,7 @@ interface IAuction {
      * @return Auction data with current calculated state
      * @dev Returns empty struct for non-existent auctions
      */
-    function getAuction(
-        uint256 auctionId
-    ) external view returns (AuctionData memory);
+    function getAuction(uint256 auctionId) external view returns (AuctionData memory);
 
     // ========== ADMIN FUNCTIONS ==========
 
@@ -389,10 +343,5 @@ interface IAuction {
     function config()
         external
         view
-        returns (
-            uint32 minBidAmount,
-            uint32 minAuctionDuration,
-            uint32 maxAuctionDuration,
-            uint32 maxExtension
-        );
+        returns (uint32 minBidAmount, uint32 minAuctionDuration, uint32 maxAuctionDuration, uint32 maxExtension);
 }
