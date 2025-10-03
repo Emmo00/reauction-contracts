@@ -310,6 +310,13 @@ interface IAuction {
     function settleAuction(uint256 auctionId) external;
 
     /**
+     * @notice Batch settle multiple ended auctions
+     * @param auctionIds Array of auction identifiers to settle
+     * @dev Can be called by anyone. Transfers NFTs to highest bidders and USDC to creators.
+     */
+    function batchSettleAuction(uint256[] calldata auctionIds) external;
+
+    /**
      * @notice Cancel an active auction without bids, returning the NFT to the creator
      * @param auctionId Unique identifier of the auction
      * @dev Caller must be the auction creator. Auction must have no bids.

@@ -157,6 +157,22 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
+    function batchSettleAuction(uint256[] calldata auctionIds) external whenNotPaused nonReentrant {
+        for (uint256 i = 0; i < auctionIds.length; i++) {
+            uint256 auctionId = auctionIds[i];
+            (address creator, uint256 amount, uint16 protocolFeeBps, address winner, uint256 tokenId) =
+                _settleAuction(auctionId);
+            if (winner != address(0)) {
+                _distributeFunds(amount, protocolFeeBps, creator);
+                _sendNFT(tokenId, winner); // Transfer NFT to the winner
+            } else {
+                // No bids were placed, return NFT to creator
+                _sendNFT(tokenId, creator);
+            }
+        }
+    }
+
+    /// @inheritdoc IAuction
     function cancelAuction(uint256 auctionId) external whenNotPaused nonReentrant {
         (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
         if (highestBidder != address(0)) require(_sendFunds(highestBidder, highestBid), "Refund failed"); // Refund highest Bidder
