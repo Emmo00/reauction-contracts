@@ -67,14 +67,14 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function createListing(uint256 tokenId, uint256 price) external whenNotPaused returns (uint256) {
+    function createListing(uint256 tokenId, uint256 price) external whenNotPaused nonReentrant returns (uint256) {
         _collectNFT(tokenId, msg.sender);
         _createListing(tokenId, price);
         return listingIdCounter;
     }
 
     /// @inheritdoc IAuction
-    function buyListing(uint256 listingId) external whenNotPaused {
+    function buyListing(uint256 listingId) external whenNotPaused nonReentrant {
         (uint256 listingPrice, uint16 protocolFeeBps, address creator, uint256 tokenId) = _buyListing(listingId);
         _collectFunds(msg.sender, listingPrice);
         _distributeFunds(listingPrice, protocolFeeBps, creator);
@@ -82,7 +82,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function cancelListing(uint256 listingId) external whenNotPaused {
+    function cancelListing(uint256 listingId) external whenNotPaused nonReentrant {
         (address creator, uint256 tokenId) = _cancelListing(listingId);
         _sendNFT(tokenId, creator);
     }
@@ -101,6 +101,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     function startAuction(uint256 tokenId, uint256 startAsk, uint256 duration)
         external
         whenNotPaused
+        nonReentrant
         returns (uint256)
     {
         _collectNFT(tokenId, msg.sender);
@@ -120,7 +121,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function settleAuction(uint256 auctionId) external whenNotPaused {
+    function settleAuction(uint256 auctionId) external whenNotPaused nonReentrant {
         (address creator, uint256 amount, uint16 protocolFeeBps, address winner, uint256 tokenId) =
             _settleAuction(auctionId);
         if (winner != address(0)) {
@@ -133,7 +134,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function cancelAuction(uint256 auctionId) external whenNotPaused {
+    function cancelAuction(uint256 auctionId) external whenNotPaused nonReentrant {
         (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
         if (highestBidder != address(0)) _sendFunds(highestBidder, highestBid); // Refund highest Bidder
         _sendNFT(tokenId, creator); // Transfer the NFT back to the creator
