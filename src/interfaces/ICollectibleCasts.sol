@@ -32,7 +32,7 @@ interface ICollectibleCasts is IERC721 {
 
     /**
      * @notice Gets the current metadata module address
-     * @return The address of the metadata module (addess(0) if not set)
+     * @return The address of the metadata module (address(0) if not set)
      */
     function metadata() external view returns (IMetadata);
 }
