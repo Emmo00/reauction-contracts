@@ -77,7 +77,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @inheritdoc IAuction
     function buyListing(uint256 listingId) external whenNotPaused nonReentrant {
         (uint256 listingPrice, uint16 protocolFeeBps, address creator, uint256 tokenId) = _buyListing(listingId);
-        _collectFunds(msg.sender, listingPrice);
+        require(_collectFunds(msg.sender, listingPrice), "Payment failed");
         _distributeFunds(listingPrice, protocolFeeBps, creator);
         _sendNFT(tokenId, msg.sender);
     }
@@ -85,7 +85,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @inheritdoc IAuction
     function buyListing(uint256 listingId, PermitData memory permit) external whenNotPaused nonReentrant {
         (uint256 listingPrice, uint16 protocolFeeBps, address creator, uint256 tokenId) = _buyListing(listingId);
-        _collectFunds(msg.sender, listingPrice, permit);
+        require(_collectFunds(msg.sender, listingPrice, permit), "Payment failed");
         _distributeFunds(listingPrice, protocolFeeBps, creator);
         _sendNFT(tokenId, msg.sender);
     }
@@ -121,20 +121,24 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @inheritdoc IAuction
     function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused nonReentrant {
-        _collectFunds(msg.sender, amount);
+        require(_collectFunds(msg.sender, amount), "Payment failed");
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
         // Refund the previous highest bidder
-        _sendFunds(formerHighestBidder, formerHighestBid);
+        require(_sendFunds(formerHighestBidder, formerHighestBid), "Refund failed");
 
         emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
     }
 
     /// @inheritdoc IAuction
-    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit) external whenNotPaused nonReentrant {
-        _collectFunds(msg.sender, amount, permit);
+    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        require(_collectFunds(msg.sender, amount, permit), "Payment failed");
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
         // Refund the previous highest bidder
-        _sendFunds(formerHighestBidder, formerHighestBid);
+        require(_sendFunds(formerHighestBidder, formerHighestBid), "Refund failed");
 
         emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
     }
@@ -155,7 +159,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @inheritdoc IAuction
     function cancelAuction(uint256 auctionId) external whenNotPaused nonReentrant {
         (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
-        if (highestBidder != address(0)) _sendFunds(highestBidder, highestBid); // Refund highest Bidder
+        if (highestBidder != address(0)) require(_sendFunds(highestBidder, highestBid), "Refund failed"); // Refund highest Bidder
         _sendNFT(tokenId, creator); // Transfer the NFT back to the creator
     }
 
@@ -178,7 +182,20 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @inheritdoc IAuction
     function getAuction(uint256 auctionId) external view returns (AuctionData memory) {
-        return auctions[auctionId];
+        AuctionData storage auction = auctions[auctionId];
+        AuctionState currentState = _getAuctionState(auction.endTime, auction.state);
+        return AuctionData({
+            creator: auction.creator,
+            tokenId: auction.tokenId,
+            startAsk: auction.startAsk,
+            highestBidder: auction.highestBidder,
+            highestBid: auction.highestBid,
+            endTime: auction.endTime,
+            bids: auction.bids,
+            extension: auction.extension,
+            protocolFeeBps: auction.protocolFeeBps,
+            state: currentState
+        });
     }
 
     /// @inheritdoc IAuction
@@ -340,6 +357,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
         AuctionData storage auction = auctions[auctionId];
 
         if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
+        if (auction.creator == msg.sender) revert Unauthorized();
         if (auction.startAsk > amount) revert InvalidBidAmount();
 
         // Calculate minimum acceptable bid
@@ -419,6 +437,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @dev Reverts if the owner is not the current owner of the NFT
      */
     function _collectNFT(uint256 tokenId, address owner) internal {
+        if (collectible.isMinted(tokenId) == false) revert NFTNotMinted();
         if (collectible.ownerOf(tokenId) != owner) revert Unauthorized();
         collectible.transferFrom(owner, address(this), tokenId);
     }
@@ -437,9 +456,9 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @param buyer Address of the buyer
      * @param amount Amount to collect
      */
-    function _collectFunds(address buyer, uint256 amount) internal {
+    function _collectFunds(address buyer, uint256 amount) internal returns (bool) {
         // Transfer USDC from buyer to contract
-        usdc.transferFrom(buyer, address(this), amount);
+        return usdc.transferFrom(buyer, address(this), amount);
     }
 
     /**
@@ -448,11 +467,11 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @param amount Amount to collect
      * @param permit Permit data for USDC
      */
-    function _collectFunds(address buyer, uint256 amount, PermitData memory permit) internal {
+    function _collectFunds(address buyer, uint256 amount, PermitData memory permit) internal returns (bool) {
         if (permit.deadline < block.timestamp) revert PermitExpired();
         IERC20Permit(address(usdc)).permit(buyer, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         // Transfer USDC from buyer to contract
-        usdc.transferFrom(buyer, address(this), amount);
+        return usdc.transferFrom(buyer, address(this), amount);
     }
 
     /**
@@ -461,8 +480,9 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @param amount Amount to send
      * @dev Assumes the contract has enough USDC balance to cover the amount
      */
-    function _sendFunds(address to, uint256 amount) internal {
-        if (amount > 0) usdc.transfer(to, amount);
+    function _sendFunds(address to, uint256 amount) internal returns (bool) {
+        if (amount > 0) return usdc.transfer(to, amount);
+        return true;
     }
 
     /**

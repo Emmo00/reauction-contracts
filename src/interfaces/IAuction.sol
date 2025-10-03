@@ -21,6 +21,7 @@ interface IAuction {
     error AuctionNotEnded(); // Auction is still active, cannot settle
     error Unauthorized(); // Signer is not authorized for this operation
     error PermitExpired(); // ERC20 Permit has expired
+    error NFTNotMinted(); // Collectible cast NFT has not been minted
 
     /**
      * @notice Global auction configuration. Used to validate per-auction params.
