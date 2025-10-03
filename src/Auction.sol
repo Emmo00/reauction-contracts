@@ -6,8 +6,9 @@ import {ICollectibleCasts} from "./interfaces/ICollectibleCasts.sol";
 import {Pausable} from "openzeppelin-contracts/contracts/utils/Pausable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
+import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
-contract Auction is IAuction, Ownable2Step, Pausable {
+contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @dev Basis points denominator (10,000 = 100%)
     uint16 internal constant BPS_DENOMINATOR = 10_000;
 
@@ -42,6 +43,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         if (_collectibleCast == address(0)) revert InvalidAddress();
         if (_usdc == address(0)) revert InvalidAddress();
         if (_treasury == address(0)) revert InvalidAddress();
+        if (_owner == address(0)) revert InvalidAddress();
 
         collectible = ICollectibleCasts(_collectibleCast);
         usdc = IERC20(_usdc);
@@ -53,6 +55,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
             minDuration: 1 hours,
             maxDuration: 30 days,
             extension: 15 minutes,
+            maxExtension: 52 weeks,
             extensionThreshold: 15 minutes,
             protocolFeeBps: uint16(1000) // 10%
         });
@@ -107,25 +110,32 @@ contract Auction is IAuction, Ownable2Step, Pausable {
     }
 
     /// @inheritdoc IAuction
-    function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused {
+    function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused nonReentrant {
         _collectFunds(msg.sender, amount);
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
         // Refund the previous highest bidder
         _sendFunds(formerHighestBidder, formerHighestBid);
+
+        emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
     }
 
     /// @inheritdoc IAuction
     function settleAuction(uint256 auctionId) external whenNotPaused {
         (address creator, uint256 amount, uint16 protocolFeeBps, address winner, uint256 tokenId) =
             _settleAuction(auctionId);
-        if (winner != address(0)) _distributeFunds(amount, protocolFeeBps, creator);
-        _sendNFT(tokenId, winner); // Transfer NFT to the winner
+        if (winner != address(0)) {
+            _distributeFunds(amount, protocolFeeBps, creator);
+            _sendNFT(tokenId, winner); // Transfer NFT to the winner
+        } else {
+            // No bids were placed, return NFT to creator
+            _sendNFT(tokenId, creator);
+        }
     }
 
     /// @inheritdoc IAuction
     function cancelAuction(uint256 auctionId) external whenNotPaused {
         (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
-        if (highestBidder != address(0)) _sendFunds(highestBidder, highestBid); // Refund hightest Bidder
+        if (highestBidder != address(0)) _sendFunds(highestBidder, highestBid); // Refund highest Bidder
         _sendNFT(tokenId, creator); // Transfer the NFT back to the creator
     }
 
@@ -139,7 +149,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         return auction.state;
     }
 
-    function auctionState(uint256 endTime, AuctionState state) internal view returns (AuctionState) {
+    function _getAuctionState(uint256 endTime, AuctionState state) internal view returns (AuctionState) {
         if (block.timestamp >= endTime && (state == AuctionState.Active)) {
             return AuctionState.Ended;
         }
@@ -309,7 +319,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
     {
         AuctionData storage auction = auctions[auctionId];
 
-        if (auctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
+        if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
         if (auction.startAsk > amount) revert InvalidBidAmount();
 
         // Calculate minimum acceptable bid
@@ -324,9 +334,10 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         // Update auction state
         auction.highestBidder = msg.sender;
         auction.highestBid = amount;
+        auction.bids++;
 
         // Extend auction if within extension threshold
-        if (auction.endTime - block.timestamp <= auctionConfig.extensionThreshold) {
+        if (auction.endTime - block.timestamp <= auctionConfig.extensionThreshold && auction.extension < auctionConfig.maxExtension) {
             uint32 extension = auctionConfig.extension;
 
             auction.endTime += extension;
@@ -343,7 +354,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
     {
         AuctionData storage auction = auctions[auctionId];
 
-        if (auctionState(auction.endTime, auction.state) != AuctionState.Ended) revert AuctionNotEnded();
+        if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Ended) revert AuctionNotEnded();
 
         // Update auction state
         auction.endTime = (block.timestamp);
@@ -354,6 +365,8 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         protocolFeeBps = auction.protocolFeeBps;
         winner = auction.highestBidder;
         tokenId = auction.tokenId;
+
+        emit AuctionSettled(auctionId, winner, tokenId, amount);
     }
 
     function _cancelAuction(uint256 auctionId)
@@ -362,7 +375,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
     {
         AuctionData storage auction = auctions[auctionId];
         if (auction.creator != msg.sender) revert Unauthorized();
-        if (auctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
+        if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
 
         highestBidder = auction.highestBidder;
         highestBid = auction.highestBid;
@@ -427,7 +440,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         uint256 creatorAmount = amount - protocolFee;
 
         // Transfer the protocol fee to the fee recipient
-        usdc.transfer(treasury, protocolFee);
+        if (protocolFee > 0) usdc.transfer(treasury, protocolFee);
 
         // Transfer the remaining amount to the creator
         usdc.transfer(creator, creatorAmount);

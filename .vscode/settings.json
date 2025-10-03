@@ -4,6 +4,7 @@
         "Farcaster",
         "IERC",
         "inheritdoc",
-        "offchain"
+        "offchain",
+        "Reentrancy"
     ]
 }

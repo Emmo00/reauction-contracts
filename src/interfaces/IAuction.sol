@@ -31,6 +31,7 @@ interface IAuction {
      * @param minDuration Minimum auction duration (seconds)
      * @param maxDuration Maximum auction duration (seconds)
      * @param extension Time to extend auction if bid placed near end (seconds)
+     * @param maxExtension Maximum total auction extension time (seconds)
      * @param extensionThreshold Time before auction end to trigger extension (seconds)
      * @param protocolFeeBps Protocol fee in basis points (bps)
      */
@@ -40,6 +41,7 @@ interface IAuction {
         uint32 minDuration;
         uint32 maxDuration;
         uint32 extension;
+        uint256 maxExtension;
         uint32 extensionThreshold;
         uint16 protocolFeeBps;
     }
@@ -177,9 +179,10 @@ interface IAuction {
      * @notice Emitted when an auction is settled
      * @param auctionId Unique identifier of the auction
      * @param winner Winner's address
+     * @param tokenId Token ID of the NFT
      * @param amount Winning bid amount in USDC
      */
-    event AuctionSettled(uint256 indexed auctionId, address indexed winner, uint256 amount);
+    event AuctionSettled(uint256 indexed auctionId, address indexed winner, uint256 tokenId, uint256 amount);
 
     /**
      * @notice Emitted when an auction is cancelled
