@@ -16,13 +16,11 @@ interface IAuction {
     error InvalidListingPrice(); // Listing price insufficient or invalid
     error InvalidAuctionConfig(); // Auction configuration parameters are invalid
     error InvalidListingConfig(); // Listing configuration parameters are invalid
-    error AuctionAlreadyExists(); // Auction for this cast already exists
     error AuctionNotActive(); // Auction is not in active state
     error ListingNotActive(); // Listing is not in active state
     error AuctionNotEnded(); // Auction is still active, cannot settle
-    error AuctionEnded(); // Auction has already ended
-    error DeadlineExpired(); // Signature deadline has passed
     error Unauthorized(); // Signer is not authorized for this operation
+    error PermitExpired(); // ERC20 Permit has expired
 
     /**
      * @notice Global auction configuration. Used to validate per-auction params.

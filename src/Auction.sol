@@ -194,7 +194,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @inheritdoc IAuction
     function setAuctionConfig(AuctionConfig calldata config) external onlyOwner {
-        if (config.minBidAmount < 1e6) revert InvalidAuctionConfig();
+        if (config.minBidAmount < 1e6) revert InvalidAuctionConfig(); // Minimum 1 USDC
         if (config.minBidIncrementBps > BPS_DENOMINATOR) {
             revert InvalidAuctionConfig();
         }
@@ -287,7 +287,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
 
         // Update listing state
         listing.buyer = msg.sender;
-        listing.endTime = (block.timestamp);
+        listing.endTime = block.timestamp;
         listing.state = ListingState.Purchased;
 
         emit ListingPurchased(listingId, msg.sender, listing.tokenId, listing.price);
@@ -303,7 +303,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
         tokenId = listing.tokenId;
 
         // Update listing state
-        listing.endTime = (block.timestamp);
+        listing.endTime = block.timestamp;
         listing.state = ListingState.Cancelled;
 
         emit ListingCancelled(listingId, listing.creator);
@@ -323,7 +323,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
             startAsk: startAsk,
             highestBidder: address(0),
             highestBid: 0,
-            endTime: (block.timestamp + duration),
+            endTime: block.timestamp + duration,
             bids: 0,
             extension: 0,
             protocolFeeBps: auctionConfig.protocolFeeBps,
@@ -380,7 +380,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
         if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Ended) revert AuctionNotEnded();
 
         // Update auction state
-        auction.endTime = (block.timestamp);
+        auction.endTime = block.timestamp;
         auction.state = AuctionState.Settled;
 
         creator = auction.creator;
@@ -406,7 +406,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
         creator = auction.creator;
 
         // Update auction state
-        auction.endTime = (block.timestamp);
+        auction.endTime = block.timestamp;
         auction.state = AuctionState.Cancelled;
 
         emit AuctionCancelled(auctionId, auction.creator);
@@ -449,8 +449,9 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @param permit Permit data for USDC
      */
     function _collectFunds(address buyer, uint256 amount, PermitData memory permit) internal {
-        // Transfer USDC from buyer to contract
+        if (permit.deadline < block.timestamp) revert PermitExpired();
         IERC20Permit(address(usdc)).permit(buyer, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
+        // Transfer USDC from buyer to contract
         usdc.transferFrom(buyer, address(this), amount);
     }
 
@@ -461,7 +462,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @dev Assumes the contract has enough USDC balance to cover the amount
      */
     function _sendFunds(address to, uint256 amount) internal {
-        usdc.transfer(to, amount);
+        if (amount > 0) usdc.transfer(to, amount);
     }
 
     /**
