@@ -100,28 +100,50 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         whenNotPaused
         returns (uint256)
     {
+        _collectNFT(tokenId, msg.sender);
         _startAuction(tokenId, startAsk, duration);
+
         return auctionIdCounter;
     }
 
     /// @inheritdoc IAuction
     function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused {
-        _placeBid(auctionId, amount);
+        _collectFunds(msg.sender, amount);
+        (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
+        // Refund the previous highest bidder
+        _sendFunds(formerHighestBidder, formerHighestBid);
     }
 
     /// @inheritdoc IAuction
     function settleAuction(uint256 auctionId) external whenNotPaused {
-        _settleAuction(auctionId);
+        (address creator, uint256 amount, uint16 protocolFeeBps, address winner, uint256 tokenId) =
+            _settleAuction(auctionId);
+        if (winner != address(0)) _distributeFunds(amount, protocolFeeBps, creator);
+        _sendNFT(tokenId, winner); // Transfer NFT to the winner
     }
 
     /// @inheritdoc IAuction
     function cancelAuction(uint256 auctionId) external whenNotPaused {
-        _cancelAuction(auctionId);
+        (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
+        if (highestBidder != address(0)) _sendFunds(highestBidder, highestBid); // Refund hightest Bidder
+        _sendNFT(tokenId, creator); // Transfer the NFT back to the creator
     }
 
     /// @inheritdoc IAuction
     function auctionState(uint256 auctionId) external view returns (AuctionState) {
-        return auctions[auctionId].state;
+        AuctionData storage auction = auctions[auctionId];
+
+        if (block.timestamp >= auction.endTime && (auction.state == AuctionState.Active)) {
+            return AuctionState.Ended;
+        }
+        return auction.state;
+    }
+
+    function auctionState(uint256 endTime, AuctionState state) internal view returns (AuctionState) {
+        if (block.timestamp >= endTime && (state == AuctionState.Active)) {
+            return AuctionState.Ended;
+        }
+        return state;
     }
 
     /// @inheritdoc IAuction
@@ -203,8 +225,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
             price: price,
             tokenId: tokenId,
             createdAt: block.timestamp,
-            purchasedAt: 0,
-            cancelledAt: 0,
+            endTime: 0,
             protocolFeeBps: listingConfig.protocolFeeBps,
             state: ListingState.Active
         });
@@ -236,7 +257,7 @@ contract Auction is IAuction, Ownable2Step, Pausable {
 
         // Update listing state
         listing.buyer = msg.sender;
-        listing.purchasedAt = uint40(block.timestamp);
+        listing.endTime = (block.timestamp);
         listing.state = ListingState.Purchased;
 
         emit ListingPurchased(listingId, msg.sender, listing.tokenId, listing.price);
@@ -244,21 +265,25 @@ contract Auction is IAuction, Ownable2Step, Pausable {
 
     function _cancelListing(uint256 listingId) internal returns (address creator, uint256 tokenId) {
         ListingData storage listing = listings[listingId];
-        if (listing.state != ListingState.Active) revert ListingNotActive();
+
         if (listing.creator != msg.sender) revert Unauthorized();
+        if (listing.state != ListingState.Active) revert ListingNotActive();
+
+        creator = listing.creator;
+        tokenId = listing.tokenId;
 
         // Update listing state
-        listing.cancelledAt = uint40(block.timestamp);
+        listing.endTime = (block.timestamp);
         listing.state = ListingState.Cancelled;
 
         emit ListingCancelled(listingId, listing.creator);
     }
 
     function _startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) internal {
-        if (collectible.ownerOf(tokenId) != msg.sender) revert Unauthorized();
-
-        // Transfer the NFT to the auction contract
-        collectible.transferFrom(msg.sender, address(this), tokenId);
+        if (startAsk > 0 && startAsk < auctionConfig.minBidAmount) revert InvalidBidAmount();
+        if (duration < auctionConfig.minDuration || duration > auctionConfig.maxDuration) {
+            revert InvalidAuctionDuration();
+        }
 
         // Create the auction
         auctionIdCounter++;
@@ -278,83 +303,71 @@ contract Auction is IAuction, Ownable2Step, Pausable {
         emit AuctionStarted(auctionIdCounter, msg.sender, tokenId, block.timestamp + duration);
     }
 
-    function _placeBid(uint256 auctionId, uint256 amount) internal {
+    function _placeBid(uint256 auctionId, uint256 amount)
+        internal
+        returns (address formerHighestBidder, uint256 formerHighestBid)
+    {
         AuctionData storage auction = auctions[auctionId];
-        if (auction.state != AuctionState.Active) revert AuctionNotActive();
-        if (block.timestamp >= auction.endAt) revert AuctionEnded();
-        if (amount < auctionConfig.minBid) revert InvalidBidAmount();
-        if (amount < auction.highestBid + ((auction.highestBid * auctionConfig.minBidIncrementBps) / BPS_DENOMINATOR)) {
-            revert InvalidBidAmount();
-        }
 
-        // Transfer USDC from bidder to contract
-        usdc.transferFrom(msg.sender, address(this), amount);
+        if (auctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
+        if (auction.startAsk > amount) revert InvalidBidAmount();
 
-        // Refund the previous highest bidder
-        if (auction.highestBidder != address(0)) {
-            usdc.transfer(auction.highestBidder, auction.highestBid);
-        }
+        // Calculate minimum acceptable bid
+        uint256 incrementAmount = (auction.highestBid * auctionConfig.minBidIncrementBps) / BPS_DENOMINATOR;
+        uint256 minBid = auction.highestBid + _max(auctionConfig.minBidAmount, incrementAmount);
+
+        if (amount < minBid) revert InvalidBidAmount();
+
+        formerHighestBidder = auction.highestBidder;
+        formerHighestBid = auction.highestBid;
 
         // Update auction state
         auction.highestBidder = msg.sender;
         auction.highestBid = amount;
 
         // Extend auction if within extension threshold
-        if (auction.endAt - block.timestamp <= auctionConfig.extensionThreshold) {
+        if (auction.endTime - block.timestamp <= auctionConfig.extensionThreshold) {
             uint32 extension = auctionConfig.extension;
-            if (auction.extension + extension > auctionConfig.maxExtension) {
-                extension = auctionConfig.maxExtension - uint32(auction.extension);
-            }
-            auction.endAt += extension;
+
+            auction.endTime += extension;
             auction.extension += extension;
-            emit AuctionExtended(auctionId, auction.endAt);
+            emit AuctionExtended(auctionId, auction.endTime);
         }
 
-        emit BidPlaced(auctionId, msg.sender, amount);
+        emit BidPlaced(auctionId, auction.tokenId, msg.sender, amount);
     }
 
-    function _settleAuction(uint256 auctionId) internal {
+    function _settleAuction(uint256 auctionId)
+        internal
+        returns (address creator, uint256 amount, uint16 protocolFeeBps, address winner, uint256 tokenId)
+    {
         AuctionData storage auction = auctions[auctionId];
-        if (auction.state != AuctionState.Active) revert AuctionNotActive();
-        if (block.timestamp < auction.endAt) revert AuctionNotEnded();
+
+        if (auctionState(auction.endTime, auction.state) != AuctionState.Ended) revert AuctionNotEnded();
 
         // Update auction state
-        auction.settledAt = uint40(block.timestamp);
+        auction.endTime = (block.timestamp);
         auction.state = AuctionState.Settled;
 
-        if (auction.highestBidder != address(0)) {
-            // Distribute funds
-            _distributeFunds(auction.highestBid, auction.protocolFeeBps, auction.creator);
-
-            // Transfer the NFT to the highest bidder
-            collectible.transferFrom(address(this), auction.highestBidder, auction.tokenId);
-
-            emit AuctionSettled(auctionId, auction.highestBidder, auction.tokenId, auction.highestBid);
-        } else {
-            // No bids were placed, return the NFT to the creator
-            collectible.transferFrom(address(this), auction.creator, auction.tokenId);
-
-            emit AuctionSettled(auctionId, address(0), auction.tokenId, 0);
-        }
+        creator = auction.creator;
+        amount = auction.highestBid;
+        protocolFeeBps = auction.protocolFeeBps;
+        winner = auction.highestBidder;
+        tokenId = auction.tokenId;
     }
 
-    function _cancelAuction(uint256 auctionId) internal {
+    function _cancelAuction(uint256 auctionId)
+        internal
+        returns (address hightestBidder, uint256 hightestBid, uint256 tokenId, address creator)
+    {
         AuctionData storage auction = auctions[auctionId];
-        if (auction.state != AuctionState.Active) revert AuctionNotActive();
         if (auction.creator != msg.sender) revert Unauthorized();
-        if (block.timestamp >= auction.endAt) revert AuctionNotEnded();
+        if (auctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
 
         // Update auction state
-        auction.cancelledAt = uint40(block.timestamp);
+        auction.endTime = (block.timestamp);
         auction.state = AuctionState.Cancelled;
 
-        // Refund the highest bidder if any
-        if (auction.highestBidder != address(0)) {
-            usdc.transfer(auction.highestBidder, auction.highestBid);
-        }
-
-        // Transfer the NFT back to the creator
-        collectible.transferFrom(address(this), auction.creator, auction.tokenId);
         emit AuctionCancelled(auctionId, auction.creator);
     }
 
@@ -389,7 +402,17 @@ contract Auction is IAuction, Ownable2Step, Pausable {
     }
 
     /**
-     * @notice Distributes funds from a sale
+     * @notice Internal function to send funds to a user
+     * @param to Recipient address
+     * @param amount Amount to send
+     * @dev Assumes the contract has enough USDC balance to cover the amount
+     */
+    function _sendFunds(address to, uint256 amount) internal {
+        usdc.transfer(to, amount);
+    }
+
+    /**
+     * @notice Internal function to distribute funds from a sale
      * @param amount Total amount to distribute
      * @param protocolFeeBps Protocol fee in basis points
      * @param creator Creator address to receive funds
@@ -403,5 +426,15 @@ contract Auction is IAuction, Ownable2Step, Pausable {
 
         // Transfer the remaining amount to the creator
         usdc.transfer(creator, creatorAmount);
+    }
+
+    /**
+     * @notice Internal function to return the maximum of two values
+     * @param a First value
+     * @param b Second value
+     * @return Maximum value
+     */
+    function _max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a >= b ? a : b;
     }
 }

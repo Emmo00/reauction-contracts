@@ -12,6 +12,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 interface IAuction {
     error InvalidAddress(); // Zero address provided where valid address required
     error InvalidBidAmount(); // Bid amount insufficient or invalid
+    error InvalidAuctionDuration(); // Auction duration outside allowed range
     error InvalidListingPrice(); // Listing price insufficient or invalid
     error InvalidAuctionConfig(); // Auction configuration parameters are invalid
     error InvalidListingConfig(); // Listing configuration parameters are invalid
@@ -86,8 +87,7 @@ interface IAuction {
      * @param price Sale price in USDC
      * @param tokenId Collectible cast token ID
      * @param createdAt Listing creation timestamp
-     * @param purchasedAt Purchase timestamp
-     * @param cancelledAt Cancellation timestamp
+     * @param endTime End time of the auction
      * @param protocolFeeBps Protocol fee (bps)
      * @param state Listing state
      */
@@ -97,8 +97,7 @@ interface IAuction {
         uint256 price;
         uint256 tokenId;
         uint256 createdAt;
-        uint256 purchasedAt;
-        uint256 cancelledAt;
+        uint256 endTime;
         uint16 protocolFeeBps;
         ListingState state;
     }
@@ -184,8 +183,10 @@ interface IAuction {
 
     /**
      * @notice Emitted when an auction is cancelled
+     * @param auctionId Unique identifier of the auction
+     * @param creator address of the auction creator
      */
-    event AuctionCancelled(uint256 indexed auctionId);
+    event AuctionCancelled(uint256 indexed auctionId, address creator);
 
     /**
      * @notice Emitted when USDC is refunded to a previous bidder
@@ -254,10 +255,12 @@ interface IAuction {
     /**
      * @notice Start a new auction for a collectible cast
      * @param tokenId Token ID of the collectible cast
+     * @param startAsk Starting ask price by the creator
+     * @param duration Duration for the auction
      * @return auctionId Unique identifier for the created auction
      * @dev Caller must be the owner of the cast and have approved this contract.
      */
-    function startAuction(uint256 tokenId) external returns (uint256);
+    function startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) external returns (uint256);
 
     /**
      * @notice Place a bid on an active auction
@@ -310,14 +313,14 @@ interface IAuction {
      * @param _config New configuration parameters
      * @dev Owner only. Validates all parameters.
      */
-    function setAuctionConfig(AuctionConfig memory _config) external;
+    function setAuctionConfig(AuctionConfig calldata _config) external;
 
     /**
      * @notice Updates global listing configuration
      * @param _config New configuration parameters
      * @dev Owner only. Validates all parameters.
      */
-    function setListingConfig(ListingConfig memory _config) external;
+    function setListingConfig(ListingConfig calldata _config) external;
 
     /**
      * @notice Pauses all auction operations
