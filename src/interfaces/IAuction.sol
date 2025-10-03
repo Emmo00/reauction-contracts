@@ -105,6 +105,20 @@ interface IAuction {
     }
 
     /**
+     * @notice ERC20 Permit data
+     * @param deadline Permit expiration
+     * @param v Signature recovery byte
+     * @param r Signature r value
+     * @param s Signature s value
+     */
+    struct PermitData {
+        uint256 deadline;
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
+
+    /**
      * @notice Auction states
      */
     enum AuctionState {
@@ -235,6 +249,14 @@ interface IAuction {
     function buyListing(uint256 listingId) external;
 
     /**
+     * @notice Buy a fixed-price listing using permit for USDC
+     * @param listingId Unique identifier of the listing to purchase
+     * @param permit Permit data for USDC
+     * @dev Caller must not be the seller. USDC approval required.
+     */
+    function buyListing(uint256 listingId, PermitData memory permit) external;
+
+    /**
      * @notice Cancel an active listing
      * @param listingId Unique identifier of the listing to cancel
      * @dev Caller must be the seller. Cannot cancel if already purchased.
@@ -272,6 +294,14 @@ interface IAuction {
      * @dev Caller must not be the current highest bidder. USDC approval required.
      */
     function placeBid(uint256 auctionId, uint256 amount) external;
+
+    /**
+     * @notice Place a bid on an active auction using permit for USDC
+     * @param auctionId Unique identifier of the auction
+     * @param amount Bid amount in USDC (6 decimals)
+     * @dev Caller must not be the current highest bidder. USDC approval required.
+     */
+    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit) external;
 
     /**
      * @notice Settle an ended auction, transferring the NFT to the winner

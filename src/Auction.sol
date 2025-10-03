@@ -7,6 +7,7 @@ import {Pausable} from "openzeppelin-contracts/contracts/utils/Pausable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
+import {IERC20Permit} from "openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @dev Basis points denominator (10,000 = 100%)
@@ -82,6 +83,14 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
+    function buyListing(uint256 listingId, PermitData memory permit) external whenNotPaused nonReentrant {
+        (uint256 listingPrice, uint16 protocolFeeBps, address creator, uint256 tokenId) = _buyListing(listingId);
+        _collectFunds(msg.sender, listingPrice, permit);
+        _distributeFunds(listingPrice, protocolFeeBps, creator);
+        _sendNFT(tokenId, msg.sender);
+    }
+
+    /// @inheritdoc IAuction
     function cancelListing(uint256 listingId) external whenNotPaused nonReentrant {
         (address creator, uint256 tokenId) = _cancelListing(listingId);
         _sendNFT(tokenId, creator);
@@ -113,6 +122,16 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     /// @inheritdoc IAuction
     function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused nonReentrant {
         _collectFunds(msg.sender, amount);
+        (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
+        // Refund the previous highest bidder
+        _sendFunds(formerHighestBidder, formerHighestBid);
+
+        emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
+    }
+
+    /// @inheritdoc IAuction
+    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit) external whenNotPaused nonReentrant {
+        _collectFunds(msg.sender, amount, permit);
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
         // Refund the previous highest bidder
         _sendFunds(formerHighestBidder, formerHighestBid);
@@ -338,7 +357,10 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
         auction.bids++;
 
         // Extend auction if within extension threshold
-        if (auction.endTime - block.timestamp <= auctionConfig.extensionThreshold && auction.extension < auctionConfig.maxExtension) {
+        if (
+            auction.endTime - block.timestamp <= auctionConfig.extensionThreshold
+                && auction.extension < auctionConfig.maxExtension
+        ) {
             uint32 extension = auctionConfig.extension;
 
             auction.endTime += extension;
@@ -417,6 +439,18 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      */
     function _collectFunds(address buyer, uint256 amount) internal {
         // Transfer USDC from buyer to contract
+        usdc.transferFrom(buyer, address(this), amount);
+    }
+
+    /**
+     * @notice Internal function to collect funds from a buyer using permit
+     * @param buyer Address of the buyer
+     * @param amount Amount to collect
+     * @param permit Permit data for USDC
+     */
+    function _collectFunds(address buyer, uint256 amount, PermitData memory permit) internal {
+        // Transfer USDC from buyer to contract
+        IERC20Permit(address(usdc)).permit(buyer, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         usdc.transferFrom(buyer, address(this), amount);
     }
 
