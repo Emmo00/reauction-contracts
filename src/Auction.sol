@@ -358,11 +358,16 @@ contract Auction is IAuction, Ownable2Step, Pausable {
 
     function _cancelAuction(uint256 auctionId)
         internal
-        returns (address hightestBidder, uint256 hightestBid, uint256 tokenId, address creator)
+        returns (address highestBidder, uint256 highestBid, uint256 tokenId, address creator)
     {
         AuctionData storage auction = auctions[auctionId];
         if (auction.creator != msg.sender) revert Unauthorized();
         if (auctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
+
+        highestBidder = auction.highestBidder;
+        highestBid = auction.highestBid;
+        tokenId = auction.tokenId;
+        creator = auction.creator;
 
         // Update auction state
         auction.endTime = (block.timestamp);
