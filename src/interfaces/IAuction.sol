@@ -10,13 +10,14 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
  * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
  */
 interface IAuction {
-    // --------------------
-    // Errors
-    // --------------------
     error InvalidAddress(); // Zero address provided where valid address required
     error InvalidBidAmount(); // Bid amount insufficient or invalid
+    error InvalidListingPrice(); // Listing price insufficient or invalid
+    error InvalidAuctionConfig(); // Auction configuration parameters are invalid
+    error InvalidListingConfig(); // Listing configuration parameters are invalid
     error AuctionAlreadyExists(); // Auction for this cast already exists
     error AuctionNotActive(); // Auction is not in active state
+    error ListingNotActive(); // Listing is not in active state
     error AuctionNotEnded(); // Auction is still active, cannot settle
     error DeadlineExpired(); // Signature deadline has passed
     error Unauthorized(); // Signer is not authorized for this operation
@@ -24,40 +25,36 @@ interface IAuction {
     error InvalidAuctionId(); // Auction ID is zero or invalid
     error AuctionNotCancellable(); // Auction is in a state that cannot be cancelled
 
-    // --------------------
-    // Structs & Enums
-    // --------------------
-
     /**
      * @notice Global auction configuration. Used to validate per-auction params.
      * @param minBidAmount Minimum bid amount in USDC (6 decimals)
+     * @param minBidIncrementBps Minimum bid increment in basis points (bps)
      * @param minAuctionDuration Minimum auction duration in seconds
      * @param maxAuctionDuration Maximum auction duration in seconds
-     * @param maxExtension Maximum time extension in seconds when bid is placed near end
+     * @param extension Time to extend auction if bid placed near end (seconds)
+     * @param maxExtension Maximum total auction extension time (seconds)
+     * @param extensionThreshold Time before auction end to trigger extension (seconds)
+     * @param protocolFeeBps Protocol fee in basis points (bps)
      */
     struct AuctionConfig {
         uint32 minBidAmount;
+        uint16 minBidIncrementBps;
         uint32 minAuctionDuration;
         uint32 maxAuctionDuration;
+        uint32 extension;
         uint32 maxExtension;
+        uint32 extensionThreshold;
+        uint16 protocolFeeBps;
     }
 
     /**
-     * @notice Auction-specific parameters. Signed and passed by offchain authorizer.
-     * @param minBid Starting bid in USDC (6 decimals)
-     * @param minBidIncrementBps Min bid increment (bps)
-     * @param protocolFeeBps Protocol fee (bps)
-     * @param duration Auction length (seconds)
-     * @param extension Extension time (seconds)
-     * @param extensionThreshold Extension trigger (seconds)
+     * @notice Global listing configuration. Used to validate per-listing params.
+     * @param minListingPrice Minimum listing price in USDC (6 decimals)
+     * @param protocolFeeBps Protocol fee in basis points (bps)
      */
-    struct AuctionParams {
-        uint64 minBid;
-        uint16 minBidIncrementBps;
+    struct ListingConfig {
+        uint256 minListingPrice;
         uint16 protocolFeeBps;
-        uint32 duration;
-        uint32 extension;
-        uint32 extensionThreshold;
     }
 
     /**
@@ -80,8 +77,8 @@ interface IAuction {
         uint40 endTime;
         uint32 bids;
         uint256 tokenId;
+        uint256 extension;
         AuctionState state;
-        AuctionParams params;
     }
 
     /**
@@ -119,16 +116,15 @@ interface IAuction {
         Cancelled
     }
 
+    /**
+     * @notice Listing states
+     */
     enum ListingState {
         None,
         Active,
         Purchased,
         Cancelled
     }
-
-    // --------------------
-    // Events
-    // --------------------
 
     /**
      * @notice Emitted when a new listing is created
@@ -137,7 +133,12 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingCreated(uint256 indexed listingId, address indexed seller, uint256 indexed tokenId, uint256 price);
+    event ListingCreated(
+        uint256 indexed listingId,
+        address indexed seller,
+        uint256 indexed tokenId,
+        uint256 price
+    );
 
     /**
      * @notice Emitted when a listing is purchased
@@ -146,13 +147,19 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingPurchased(uint256 indexed listingId, address indexed buyer, uint256 indexed tokenId, uint256 price);
+    event ListingPurchased(
+        uint256 indexed listingId,
+        address indexed buyer,
+        uint256 indexed tokenId,
+        uint256 price
+    );
 
     /**
      * @notice Emitted when a listing is canceled
      * @param listingId Unique identifier for the listing
+     * @param creator Address of the listing creator (seller)
      */
-    event ListingCancelled(uint256 indexed listingId);
+    event ListingCancelled(uint256 indexed listingId, address indexed creator);
 
     /**
      * @notice Emitted when a new auction is started
@@ -161,7 +168,12 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param endTime Auction end timestamp
      */
-    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint40 endTime);
+    event AuctionStarted(
+        uint256 indexed auctionId,
+        address indexed creator,
+        uint256 indexed tokenId,
+        uint40 endTime
+    );
 
     /**
      * @notice Emitted when a bid is placed
@@ -170,7 +182,12 @@ interface IAuction {
      * @param bidder Bidder's address
      * @param amount Bid amount in USDC
      */
-    event BidPlaced(uint256 indexed auctionId, uint256 indexed tokenId, address indexed bidder, uint256 amount);
+    event BidPlaced(
+        uint256 indexed auctionId,
+        uint256 indexed tokenId,
+        address indexed bidder,
+        uint256 amount
+    );
 
     /**
      * @notice Emitted when auction end time is extended
@@ -185,7 +202,11 @@ interface IAuction {
      * @param winner Winner's address
      * @param amount Winning bid amount in USDC
      */
-    event AuctionSettled(uint256 indexed auctionId, address indexed winner, uint256 amount);
+    event AuctionSettled(
+        uint256 indexed auctionId,
+        address indexed winner,
+        uint256 amount
+    );
 
     /**
      * @notice Emitted when an auction is cancelled
@@ -198,7 +219,11 @@ interface IAuction {
      * @param to Address receiving refund
      * @param amount Amount refunded
      */
-    event BidRefunded(uint256 indexed auctionId, address indexed to, uint256 amount);
+    event BidRefunded(
+        uint256 indexed auctionId,
+        address indexed to,
+        uint256 amount
+    );
 
     /**
      * @notice Emitted when treasury address is updated
@@ -213,9 +238,11 @@ interface IAuction {
      */
     event AuctionConfigSet(AuctionConfig config);
 
-    // --------------------
-    // Functions
-    // --------------------
+    /**
+     * @notice Emitted when listing configuration is updated
+     * @param config New listing configuration
+     */
+    event ListingConfigSet(ListingConfig config);
 
     /**
      * @notice Create a fixed-price listing for a collectible cast
@@ -224,7 +251,10 @@ interface IAuction {
      * @return listingId Unique identifier for the created listing
      * @dev Caller must be the owner of the cast and have approved this contract.
      */
-    function createListing(uint256 tokenId, uint256 price) external returns (uint256);
+    function createListing(
+        uint256 tokenId,
+        uint256 price
+    ) external returns (uint256);
 
     /**
      * @notice Buy a fixed-price listing
@@ -239,6 +269,24 @@ interface IAuction {
      * @dev Caller must be the seller. Cannot cancel if already purchased.
      */
     function cancelListing(uint256 listingId) external;
+
+    /**
+     * @notice Read listing state
+     * @param listingId Listing identifier
+     * @return Current state
+     */
+    function listingState(
+        uint256 listingId
+    ) external view returns (ListingState);
+
+    /**
+     * @notice Get listing data
+     * @param listingId Listing identifier
+     * @return Listing data
+     */
+    function getListing(
+        uint256 listingId
+    ) external view returns (ListingData memory);
 
     /**
      * @notice Start a new auction for a collectible cast
@@ -275,7 +323,9 @@ interface IAuction {
      * @param auctionId Auction identifier
      * @return Current state
      */
-    function auctionState(uint256 auctionId) external view returns (AuctionState);
+    function auctionState(
+        uint256 auctionId
+    ) external view returns (AuctionState);
 
     /**
      * @notice Get auction data with calculated state
@@ -283,7 +333,9 @@ interface IAuction {
      * @return Auction data with current calculated state
      * @dev Returns empty struct for non-existent auctions
      */
-    function getAuction(uint256 auctionId) external view returns (AuctionData memory);
+    function getAuction(
+        uint256 auctionId
+    ) external view returns (AuctionData memory);
 
     // ========== ADMIN FUNCTIONS ==========
 
@@ -300,6 +352,13 @@ interface IAuction {
      * @dev Owner only. Validates all parameters.
      */
     function setAuctionConfig(AuctionConfig memory _config) external;
+
+    /**
+     * @notice Updates global listing configuration
+     * @param _config New configuration parameters
+     * @dev Owner only. Validates all parameters.
+     */
+    function setListingConfig(ListingConfig memory _config) external;
 
     /**
      * @notice Pauses all auction operations
@@ -336,12 +395,35 @@ interface IAuction {
     /**
      * @notice Global auction configuration
      * @return minBidAmount Minimum bid amount in USDC (6 decimals)
+     * @return minBidIncrementBps Minimum bid increment in basis points (bps)
      * @return minAuctionDuration Minimum auction duration in seconds
      * @return maxAuctionDuration Maximum auction duration in seconds
-     * @return maxExtension Maximum time extension in seconds
+     * @return extension Time to extend auction if bid placed near end (seconds)
+     * @return maxExtension Maximum total auction extension time (seconds)
+     * @return extensionThreshold Time before auction end to trigger extension (seconds)
+     * @return protocolFeeBps Protocol fee in basis points (bps)
      */
-    function config()
+    function auctionConfig()
         external
         view
-        returns (uint32 minBidAmount, uint32 minAuctionDuration, uint32 maxAuctionDuration, uint32 maxExtension);
+        returns (
+            uint32 minBidAmount,
+            uint16 minBidIncrementBps,
+            uint32 minAuctionDuration,
+            uint32 maxAuctionDuration,
+            uint32 extension,
+            uint32 maxExtension,
+            uint32 extensionThreshold,
+            uint16 protocolFeeBps
+        );
+
+    /**
+     * @notice Global listing configuration
+     * @return minListingPrice Minimum listing price in USDC (6 decimals)
+     * @return protocolFeeBps Protocol fee in basis points (bps)
+     */
+    function listingConfig()
+        external
+        view
+        returns (uint256 minListingPrice, uint16 protocolFeeBps);
 }
