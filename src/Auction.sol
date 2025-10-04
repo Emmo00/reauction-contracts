@@ -33,6 +33,8 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     mapping(uint256 => AuctionData) public auctions;
     /// @notice Mapping of listing ids to listing data
     mapping(uint256 => ListingData) public listings;
+    /// @notice Mapping for tracking pending withdrawals
+    mapping(address => uint256) public pendingWithdrawals;
 
     /**
      * @notice Creates auction contract
@@ -122,12 +124,27 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
 
     /// @inheritdoc IAuction
     function placeBid(uint256 auctionId, uint256 amount) external whenNotPaused nonReentrant {
-        require(_collectFunds(msg.sender, amount), "Payment failed");
+        uint256 pendingBalance = pendingWithdrawals[msg.sender];
+        uint256 amountFromPending = pendingBalance >= amount ? amount : pendingBalance;
+        uint256 amountToCollect = amount - amountFromPending;
+        
+        // Collect additional funds if needed
+        if (amountToCollect > 0) {
+            require(_collectFunds(msg.sender, amountToCollect), "Payment failed");
+        }
+        
+        // Use pending withdrawals if available
+        if (amountFromPending > 0) {
+            _decreasePendingWithdrawal(msg.sender, amountFromPending);
+        }
+        
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
+        
         // Refund the previous highest bidder
-        require(_sendFunds(formerHighestBidder, formerHighestBid), "Refund failed");
-
-        emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
+        if (formerHighestBidder != address(0) && formerHighestBid > 0) {
+            _increasePendingWithdrawal(formerHighestBidder, formerHighestBid);
+            emit AuctionRefundAvailable(formerHighestBidder, auctionId, formerHighestBid);
+        }
     }
 
     /// @inheritdoc IAuction
@@ -136,12 +153,27 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         whenNotPaused
         nonReentrant
     {
-        require(_collectFundsWithPermit(msg.sender, amount, permit), "Payment failed");
+        uint256 pendingBalance = pendingWithdrawals[msg.sender];
+        uint256 amountFromPending = pendingBalance >= amount ? amount : pendingBalance;
+        uint256 amountToCollect = amount - amountFromPending;
+        
+        // Collect additional funds if needed
+        if (amountToCollect > 0) {
+            require(_collectFundsWithPermit(msg.sender, amountToCollect, permit), "Payment failed");
+        }
+        
+        // Use pending withdrawals if available
+        if (amountFromPending > 0) {
+            _decreasePendingWithdrawal(msg.sender, amountFromPending);
+        }
+        
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
+        
         // Refund the previous highest bidder
-        require(_sendFunds(formerHighestBidder, formerHighestBid), "Refund failed");
-
-        emit BidRefunded(auctionId, formerHighestBidder, formerHighestBid);
+        if (formerHighestBidder != address(0) && formerHighestBid > 0) {
+            _increasePendingWithdrawal(formerHighestBidder, formerHighestBid);
+            emit AuctionRefundAvailable(formerHighestBidder, auctionId, formerHighestBid);
+        }
     }
 
     /// @inheritdoc IAuction
@@ -176,7 +208,12 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     /// @inheritdoc IAuction
     function cancelAuction(uint256 auctionId) external whenNotPaused nonReentrant {
         (address highestBidder, uint256 highestBid, uint256 tokenId, address creator) = _cancelAuction(auctionId);
-        if (highestBidder != address(0)) require(_sendFunds(highestBidder, highestBid), "Refund failed"); // Refund highest Bidder
+        if (highestBidder != address(0)) {
+            // Refund the highest bidder
+            _increasePendingWithdrawal(highestBidder, highestBid);
+
+            emit AuctionRefundAvailable(highestBidder, auctionId, highestBid);
+        }
         _sendNFT(tokenId, creator); // Transfer the NFT back to the creator
     }
 
@@ -270,6 +307,22 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     /// @inheritdoc IAuction
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @inheritdoc IAuction
+    function withdraw() external whenNotPaused nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        if (amount == 0) revert InsufficientWithdrawalBalance();
+        
+        _decreasePendingWithdrawal(msg.sender, amount);
+        require(_sendFunds(msg.sender, amount), "Transfer failed");
+        
+        emit AuctionRefundWithdrawn(msg.sender, 0, amount);
+    }
+
+    /// @inheritdoc IAuction
+    function getPendingWithdrawal(address user) external view returns (uint256) {
+        return pendingWithdrawals[user];
     }
 
     /**
@@ -489,6 +542,35 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         IERC20Permit(address(usdc)).permit(buyer, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         // Transfer USDC from buyer to contract
         return usdc.transferFrom(buyer, address(this), amount);
+    }
+
+    /**
+     * @notice Internal function to increase pending withdrawal balance
+     * @param user Address of the user
+     * @param amountIncrease Amount to increase
+     */
+    function _increasePendingWithdrawal(address user, uint256 amountIncrease) internal {
+        if (amountIncrease <= 0) revert InvalidAmount();
+        if (user == address(0)) revert InvalidAddress();
+
+        pendingWithdrawals[user] += amountIncrease;
+    }
+
+    /**
+     * @notice Internal function to decrease pending withdrawal balance
+     * @param user Address of the user
+     * @param amountDecrease Amount to decrease
+     */
+    function _decreasePendingWithdrawal(address user, uint256 amountDecrease) internal {
+        if (amountDecrease <= 0) revert InvalidAmount();
+        if (user == address(0)) revert InvalidAddress();
+
+        uint256 currentBalance = pendingWithdrawals[user];
+        if (amountDecrease > currentBalance) {
+            revert InsufficientWithdrawalBalance();
+        }
+
+        pendingWithdrawals[user] = currentBalance - amountDecrease;
     }
 
     /**

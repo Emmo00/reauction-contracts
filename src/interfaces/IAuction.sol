@@ -12,6 +12,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 interface IAuction {
     error InvalidAddress(); // Zero address provided where valid address required
     error InvalidBidAmount(); // Bid amount insufficient or invalid
+    error InvalidAmount();
     error InvalidAuctionDuration(); // Auction duration outside allowed range
     error InvalidListingPrice(); // Listing price insufficient or invalid
     error InvalidAuctionConfig(); // Auction configuration parameters are invalid
@@ -22,6 +23,7 @@ interface IAuction {
     error Unauthorized(); // Signer is not authorized for this operation
     error PermitExpired(); // ERC20 Permit has expired
     error NFTNotMinted(); // Collectible cast NFT has not been minted
+    error InsufficientWithdrawalBalance();
 
     /**
      * @notice Global auction configuration. Used to validate per-auction params.
@@ -204,13 +206,9 @@ interface IAuction {
      */
     event AuctionCancelled(uint256 indexed auctionId, address creator);
 
-    /**
-     * @notice Emitted when USDC is refunded to a previous bidder
-     * @param auctionId Unique identifier of the auction
-     * @param to Address receiving refund
-     * @param amount Amount refunded
-     */
-    event BidRefunded(uint256 indexed auctionId, address indexed to, uint256 amount);
+    event AuctionRefundAvailable(address indexed user, uint256 indexed auctionId, uint256 amount);
+
+    event AuctionRefundWithdrawn(address indexed user, uint256 indexed auctionId, uint256 amount);
 
     /**
      * @notice Emitted when treasury address is updated
@@ -392,4 +390,16 @@ interface IAuction {
      * @return Current treasury address
      */
     function treasury() external view returns (address);
+
+    /**
+     * @notice Withdraw pending refunds
+     */
+    function withdraw() external;
+
+    /**
+     * @notice Get pending withdrawal amount for a user
+     * @param user Address to check
+     * @return Pending withdrawal amount
+     */
+    function getPendingWithdrawal(address user) external view returns (uint256);
 }
