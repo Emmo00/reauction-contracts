@@ -83,9 +83,9 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function buyListing(uint256 listingId, PermitData memory permit) external whenNotPaused nonReentrant {
+    function buyListingWithPermit(uint256 listingId, PermitData memory permit) external whenNotPaused nonReentrant {
         (uint256 listingPrice, uint16 protocolFeeBps, address creator, uint256 tokenId) = _buyListing(listingId);
-        require(_collectFunds(msg.sender, listingPrice, permit), "Payment failed");
+        require(_collectFundsWithPermit(msg.sender, listingPrice, permit), "Payment failed");
         _distributeFunds(listingPrice, protocolFeeBps, creator);
         _sendNFT(tokenId, msg.sender);
     }
@@ -130,12 +130,12 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @inheritdoc IAuction
-    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit)
+    function placeBidWithPermit(uint256 auctionId, uint256 amount, PermitData memory permit)
         external
         whenNotPaused
         nonReentrant
     {
-        require(_collectFunds(msg.sender, amount, permit), "Payment failed");
+        require(_collectFundsWithPermit(msg.sender, amount, permit), "Payment failed");
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
         // Refund the previous highest bidder
         require(_sendFunds(formerHighestBidder, formerHighestBid), "Refund failed");
@@ -483,7 +483,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard {
      * @param amount Amount to collect
      * @param permit Permit data for USDC
      */
-    function _collectFunds(address buyer, uint256 amount, PermitData memory permit) internal returns (bool) {
+    function _collectFundsWithPermit(address buyer, uint256 amount, PermitData memory permit) internal returns (bool) {
         if (permit.deadline < block.timestamp) revert PermitExpired();
         IERC20Permit(address(usdc)).permit(buyer, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         // Transfer USDC from buyer to contract

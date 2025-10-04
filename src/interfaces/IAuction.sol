@@ -253,7 +253,7 @@ interface IAuction {
      * @param permit Permit data for USDC
      * @dev Caller must not be the seller. USDC approval required.
      */
-    function buyListing(uint256 listingId, PermitData memory permit) external;
+    function buyListingWithPermit(uint256 listingId, PermitData memory permit) external;
 
     /**
      * @notice Cancel an active listing
@@ -300,7 +300,7 @@ interface IAuction {
      * @param amount Bid amount in USDC (6 decimals)
      * @dev Caller must not be the current highest bidder. USDC approval required.
      */
-    function placeBid(uint256 auctionId, uint256 amount, PermitData memory permit) external;
+    function placeBidWithPermit(uint256 auctionId, uint256 amount, PermitData memory permit) external;
 
     /**
      * @notice Settle an ended auction, transferring the NFT to the winner
