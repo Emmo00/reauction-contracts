@@ -72,6 +72,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
 
     /// @inheritdoc IAuction
     function createListing(uint256 tokenId, uint256 price) external whenNotPaused nonReentrant returns (uint256) {
+        if (price < listingConfig.minListingPrice) revert InvalidListingPrice();
         _collectNFT(tokenId, msg.sender);
         _createListing(tokenId, price);
         return listingIdCounter;
@@ -116,6 +117,13 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         nonReentrant
         returns (uint256)
     {
+        if (startAsk > 0 && startAsk < auctionConfig.minBidAmount) {
+            revert InvalidBidAmount();
+        }
+        if (duration < auctionConfig.minDuration || duration > auctionConfig.maxDuration) {
+            revert InvalidAuctionDuration();
+        }
+
         _collectNFT(tokenId, msg.sender);
         _startAuction(tokenId, startAsk, duration);
 
@@ -127,19 +135,19 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         uint256 pendingBalance = pendingWithdrawals[msg.sender];
         uint256 amountFromPending = pendingBalance >= amount ? amount : pendingBalance;
         uint256 amountToCollect = amount - amountFromPending;
-        
+
         // Collect additional funds if needed
         if (amountToCollect > 0) {
             require(_collectFunds(msg.sender, amountToCollect), "Payment failed");
         }
-        
+
         // Use pending withdrawals if available
         if (amountFromPending > 0) {
             _decreasePendingWithdrawal(msg.sender, amountFromPending);
         }
-        
+
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
-        
+
         // Refund the previous highest bidder
         if (formerHighestBidder != address(0) && formerHighestBid > 0) {
             _increasePendingWithdrawal(formerHighestBidder, formerHighestBid);
@@ -156,19 +164,19 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         uint256 pendingBalance = pendingWithdrawals[msg.sender];
         uint256 amountFromPending = pendingBalance >= amount ? amount : pendingBalance;
         uint256 amountToCollect = amount - amountFromPending;
-        
+
         // Collect additional funds if needed
         if (amountToCollect > 0) {
             require(_collectFundsWithPermit(msg.sender, amountToCollect, permit), "Payment failed");
         }
-        
+
         // Use pending withdrawals if available
         if (amountFromPending > 0) {
             _decreasePendingWithdrawal(msg.sender, amountFromPending);
         }
-        
+
         (address formerHighestBidder, uint256 formerHighestBid) = _placeBid(auctionId, amount);
-        
+
         // Refund the previous highest bidder
         if (formerHighestBidder != address(0) && formerHighestBid > 0) {
             _increasePendingWithdrawal(formerHighestBidder, formerHighestBid);
@@ -313,11 +321,11 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     function withdraw() external whenNotPaused nonReentrant {
         uint256 amount = pendingWithdrawals[msg.sender];
         if (amount == 0) revert InsufficientWithdrawalBalance();
-        
+
         _decreasePendingWithdrawal(msg.sender, amount);
         require(_sendFunds(msg.sender, amount), "Transfer failed");
-        
-        emit AuctionRefundWithdrawn(msg.sender, 0, amount);
+
+        emit AuctionRefundWithdrawn(msg.sender, amount);
     }
 
     /// @inheritdoc IAuction
@@ -332,8 +340,6 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
      * @dev Reverts if the price is below the minimum listing price
      */
     function _createListing(uint256 tokenId, uint256 price) internal {
-        if (price < listingConfig.minListingPrice) revert InvalidListingPrice();
-
         // Create the listing
         listingIdCounter++;
         listings[listingIdCounter] = ListingData({
@@ -397,11 +403,6 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     }
 
     function _startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) internal {
-        if (startAsk > 0 && startAsk < auctionConfig.minBidAmount) revert InvalidBidAmount();
-        if (duration < auctionConfig.minDuration || duration > auctionConfig.maxDuration) {
-            revert InvalidAuctionDuration();
-        }
-
         // Create the auction
         auctionIdCounter++;
         auctions[auctionIdCounter] = AuctionData({
@@ -518,6 +519,9 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
      * @param to Recipient address
      */
     function _sendNFT(uint256 tokenId, address to) internal {
+        if (collectible.ownerOf(tokenId) != address(this)) {
+            revert Unauthorized();
+        }
         collectible.transferFrom(address(this), to, tokenId);
     }
 
@@ -595,10 +599,12 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         uint256 creatorAmount = amount - protocolFee;
 
         // Transfer the protocol fee to the fee recipient
-        if (protocolFee > 0) usdc.transfer(treasury, protocolFee);
+        if (protocolFee > 0) {
+            require(usdc.transfer(treasury, protocolFee), "Transfer to treasury failed");
+        }
 
         // Transfer the remaining amount to the creator
-        usdc.transfer(creator, creatorAmount);
+        require(usdc.transfer(creator, creatorAmount), "Transfer to creator failed");
     }
 
     /**

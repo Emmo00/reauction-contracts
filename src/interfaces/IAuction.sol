@@ -208,7 +208,7 @@ interface IAuction {
 
     event AuctionRefundAvailable(address indexed user, uint256 indexed auctionId, uint256 amount);
 
-    event AuctionRefundWithdrawn(address indexed user, uint256 indexed auctionId, uint256 amount);
+    event AuctionRefundWithdrawn(address indexed user, uint256 amount);
 
     /**
      * @notice Emitted when treasury address is updated
