@@ -211,8 +211,19 @@ interface IAuction {
      */
     event AuctionCancelled(uint256 indexed auctionId, address creator, uint256 indexed tokenId);
 
+    /**
+     * @notice Emitted when the user is outbid
+     * @param user User's address
+     * @param auctionId Unique identifier of the auction
+     * @param amount Amount available for refund
+     */
     event AuctionRefundAvailable(address indexed user, uint256 indexed auctionId, uint256 amount);
 
+    /**
+     * @notice Emitted when the user withdraws refund from the smart contract
+     * @param user User's address
+     * @param amount amount the user withdrew
+     */
     event AuctionRefundWithdrawn(address indexed user, uint256 amount);
 
     /**
