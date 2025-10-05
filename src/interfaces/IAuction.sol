@@ -153,26 +153,29 @@ interface IAuction {
      * @notice Emitted when a listing is purchased
      * @param listingId Unique identifier for the listing
      * @param buyer Address of the buyer
+     * @param creator Address of the seller
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingPurchased(uint256 indexed listingId, address indexed buyer, uint256 indexed tokenId, uint256 price);
+    event ListingPurchased(uint256 indexed listingId, address indexed buyer, address indexed creator, uint256 tokenId, uint256 price);
 
     /**
      * @notice Emitted when a listing is canceled
      * @param listingId Unique identifier for the listing
      * @param creator Address of the listing creator (seller)
+     * @param tokenId Token ID of the NFT
      */
-    event ListingCancelled(uint256 indexed listingId, address indexed creator);
+    event ListingCancelled(uint256 indexed listingId, address indexed creator, uint256 indexed tokenId);
 
     /**
      * @notice Emitted when a new auction is started
      * @param auctionId Unique identifier for the auction
      * @param creator Auction creator's address
      * @param tokenId Token ID of the NFT
+     * @param startAsk Starting ask price
      * @param endTime Auction end timestamp
      */
-    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 endTime);
+    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 startAsk, uint256 endTime);
 
     /**
      * @notice Emitted when a bid is placed
@@ -193,18 +196,20 @@ interface IAuction {
     /**
      * @notice Emitted when an auction is settled
      * @param auctionId Unique identifier of the auction
+     * @param creator Auction creator's address
      * @param winner Winner's address
      * @param tokenId Token ID of the NFT
      * @param amount Winning bid amount in USDC
      */
-    event AuctionSettled(uint256 indexed auctionId, address indexed winner, uint256 tokenId, uint256 amount);
+    event AuctionSettled(uint256 indexed auctionId, address indexed creator, address indexed winner, uint256 tokenId, uint256 amount);
 
     /**
      * @notice Emitted when an auction is cancelled
      * @param auctionId Unique identifier of the auction
      * @param creator address of the auction creator
+     * @param tokenId Token ID of the NFT
      */
-    event AuctionCancelled(uint256 indexed auctionId, address creator);
+    event AuctionCancelled(uint256 indexed auctionId, address creator, uint256 indexed tokenId);
 
     event AuctionRefundAvailable(address indexed user, uint256 indexed auctionId, uint256 amount);
 

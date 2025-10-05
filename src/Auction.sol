@@ -383,7 +383,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         listing.endTime = block.timestamp;
         listing.state = ListingState.Purchased;
 
-        emit ListingPurchased(listingId, msg.sender, listing.tokenId, listing.price);
+        emit ListingPurchased(listingId, msg.sender, listing.creator, listing.tokenId, listing.price);
     }
 
     function _cancelListing(uint256 listingId) internal returns (address creator, uint256 tokenId) {
@@ -399,7 +399,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         listing.endTime = block.timestamp;
         listing.state = ListingState.Cancelled;
 
-        emit ListingCancelled(listingId, listing.creator);
+        emit ListingCancelled(listingId, listing.creator, listing.tokenId);
     }
 
     function _startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) internal {
@@ -418,7 +418,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
             state: AuctionState.Active
         });
 
-        emit AuctionStarted(auctionIdCounter, msg.sender, tokenId, block.timestamp + duration);
+        emit AuctionStarted(auctionIdCounter, msg.sender, tokenId, startAsk, block.timestamp + duration);
     }
 
     function _placeBid(uint256 auctionId, uint256 amount)
@@ -478,7 +478,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         winner = auction.highestBidder;
         tokenId = auction.tokenId;
 
-        emit AuctionSettled(auctionId, winner, tokenId, amount);
+        emit AuctionSettled(auctionId, auction.creator, winner, tokenId, amount);
     }
 
     function _cancelAuction(uint256 auctionId)
@@ -498,7 +498,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         auction.endTime = block.timestamp;
         auction.state = AuctionState.Cancelled;
 
-        emit AuctionCancelled(auctionId, auction.creator);
+        emit AuctionCancelled(auctionId, auction.creator, auction.tokenId);
     }
 
     /**
