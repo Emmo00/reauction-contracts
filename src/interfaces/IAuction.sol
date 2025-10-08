@@ -143,11 +143,11 @@ interface IAuction {
     /**
      * @notice Emitted when a new listing is created
      * @param listingId Unique identifier for the listing
-     * @param seller Address of the seller
+     * @param creator Address of the seller
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingCreated(uint256 indexed listingId, address indexed seller, uint256 indexed tokenId, uint256 price);
+    event ListingCreated(uint256 indexed listingId, address indexed creator, uint256 indexed tokenId, uint256 price);
 
     /**
      * @notice Emitted when a listing is purchased
@@ -157,7 +157,9 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param price Sale price of the NFT
      */
-    event ListingPurchased(uint256 indexed listingId, address indexed buyer, address indexed creator, uint256 tokenId, uint256 price);
+    event ListingPurchased(
+        uint256 indexed listingId, address indexed buyer, address indexed creator, uint256 tokenId, uint256 price
+    );
 
     /**
      * @notice Emitted when a listing is canceled
@@ -175,7 +177,9 @@ interface IAuction {
      * @param startAsk Starting ask price
      * @param endTime Auction end timestamp
      */
-    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 startAsk, uint256 endTime);
+    event AuctionStarted(
+        uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 startAsk, uint256 endTime
+    );
 
     /**
      * @notice Emitted when a bid is placed
@@ -201,7 +205,9 @@ interface IAuction {
      * @param tokenId Token ID of the NFT
      * @param amount Winning bid amount in USDC
      */
-    event AuctionSettled(uint256 indexed auctionId, address indexed creator, address indexed winner, uint256 tokenId, uint256 amount);
+    event AuctionSettled(
+        uint256 indexed auctionId, address indexed creator, address indexed winner, uint256 tokenId, uint256 amount
+    );
 
     /**
      * @notice Emitted when an auction is cancelled

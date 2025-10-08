@@ -7,6 +7,5 @@ import {Auction} from "../src/Auction.sol";
 contract AuctionTest is Test {
     Auction public auction;
 
-    function setUp() public {
-    }
+    function setUp() public {}
 }
