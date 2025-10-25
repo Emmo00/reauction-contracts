@@ -278,6 +278,7 @@ contract Auction is
         if (oldTreasury == _treasury) return;
 
         treasury = _treasury;
+
         emit TreasurySet(oldTreasury, treasury);
     }
 
