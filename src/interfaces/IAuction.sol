@@ -10,21 +10,6 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
  * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
  */
 interface IAuction {
-    error InvalidAddress(); // Zero address provided where valid address required
-    error InvalidBidAmount(); // Bid amount insufficient or invalid
-    error InvalidAmount();
-    error InvalidAuctionDuration(); // Auction duration outside allowed range
-    error InvalidListingPrice(); // Listing price insufficient or invalid
-    error InvalidAuctionConfig(); // Auction configuration parameters are invalid
-    error InvalidListingConfig(); // Listing configuration parameters are invalid
-    error AuctionNotActive(); // Auction is not in active state
-    error ListingNotActive(); // Listing is not in active state
-    error AuctionNotEnded(); // Auction is still active, cannot settle
-    error Unauthorized(); // Signer is not authorized for this operation
-    error PermitExpired(); // ERC20 Permit has expired
-    error NFTNotMinted(); // Collectible cast NFT has not been minted
-    error InsufficientWithdrawalBalance();
-
     /**
      * @notice Global auction configuration. Used to validate per-auction params.
      * @param minBidAmount Minimum bid amount in USDC (6 decimals)
@@ -137,6 +122,21 @@ interface IAuction {
         Purchased,
         Cancelled
     }
+
+    error InvalidAddress(); // Zero address provided where valid address required
+    error InvalidBidAmount(); // Bid amount insufficient or invalid
+    error InvalidAmount();
+    error InvalidAuctionDuration(); // Auction duration outside allowed range
+    error InvalidListingPrice(); // Listing price insufficient or invalid
+    error InvalidAuctionConfig(); // Auction configuration parameters are invalid
+    error InvalidListingConfig(); // Listing configuration parameters are invalid
+    error AuctionNotActive(); // Auction is not in active state
+    error ListingNotActive(); // Listing is not in active state
+    error AuctionNotEnded(); // Auction is still active, cannot settle
+    error Unauthorized(); // Signer is not authorized for this operation
+    error PermitExpired(); // ERC20 Permit has expired
+    error NFTNotMinted(); // Collectible cast NFT has not been minted
+    error InsufficientWithdrawalBalance();
 
     /**
      * @notice Emitted when a new listing is created

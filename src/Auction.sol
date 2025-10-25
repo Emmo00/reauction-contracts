@@ -6,16 +6,21 @@ import {ICollectibleCasts} from "./interfaces/ICollectibleCasts.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {IERC20Permit} from "openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {ERC721HolderUpgradeable} from
     "@openzeppelin/contracts-upgradeable/token/ERC721/utils/ERC721HolderUpgradeable.sol";
 
+/**
+ * @title IAuction
+ * @author Emmo00
+ * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
+ */
 contract Auction is
     IAuction,
-    Ownable2StepUpgradeable,
-    PausableUpgradeable,
+    OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
+    PausableUpgradeable,
     ERC721HolderUpgradeable
 {
     /// @dev Basis points denominator (10,000 = 100%)
@@ -46,29 +51,28 @@ contract Auction is
 
     /**
      * @notice Creates auction contract
-     * @param _collectibleCast NFT contract address
+     * @param _collectible NFT contract address
      * @param _usdc USDC token address
      * @param _treasury Fee recipient
      * @param _owner Contract owner
      */
-    function initialize(address _collectibleCast, address _usdc, address _treasury, address _owner)
+    function initialize(address _collectible, address _usdc, address _treasury, address _owner)
         external
         initializer
     {
-        if (_collectibleCast == address(0)) revert InvalidAddress();
+        if (_collectible == address(0)) revert InvalidAddress();
         if (_usdc == address(0)) revert InvalidAddress();
         if (_treasury == address(0)) revert InvalidAddress();
         if (_owner == address(0)) revert InvalidAddress();
 
-        __Ownable2Step_init();
-        __Pausable_init();
+        __Ownable_init(_owner);
         __ReentrancyGuard_init();
+        __Pausable_init();
         __ERC721Holder_init();
 
-        collectible = ICollectibleCasts(_collectibleCast);
+        collectible = ICollectibleCasts(_collectible);
         usdc = IERC20(_usdc);
         treasury = _treasury;
-        _transferOwnership(_owner);
 
         auctionConfig = AuctionConfig({
             minBidAmount: 1e6, // 1 USDC
