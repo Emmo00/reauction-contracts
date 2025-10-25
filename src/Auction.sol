@@ -111,21 +111,18 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     }
 
     /// @inheritdoc IAuction
-    function startAuction(uint256 tokenId, uint256 startAsk, uint256 duration)
+    function startAuction(uint256 tokenId, uint256 duration)
         external
         whenNotPaused
         nonReentrant
         returns (uint256)
     {
-        if (startAsk > 0 && startAsk < auctionConfig.minBidAmount) {
-            revert InvalidBidAmount();
-        }
         if (duration < auctionConfig.minDuration || duration > auctionConfig.maxDuration) {
             revert InvalidAuctionDuration();
         }
 
         _collectNFT(tokenId, msg.sender);
-        _startAuction(tokenId, startAsk, duration);
+        _startAuction(tokenId, duration);
 
         return auctionIdCounter;
     }
@@ -249,7 +246,6 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         return AuctionData({
             creator: auction.creator,
             tokenId: auction.tokenId,
-            startAsk: auction.startAsk,
             highestBidder: auction.highestBidder,
             highestBid: auction.highestBid,
             endTime: auction.endTime,
@@ -402,13 +398,12 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         emit ListingCancelled(listingId, listing.creator, listing.tokenId);
     }
 
-    function _startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) internal {
+    function _startAuction(uint256 tokenId, uint256 duration) internal {
         // Create the auction
         auctionIdCounter++;
         auctions[auctionIdCounter] = AuctionData({
             creator: msg.sender,
             tokenId: tokenId,
-            startAsk: startAsk,
             highestBidder: address(0),
             highestBid: 0,
             endTime: block.timestamp + duration,
@@ -418,7 +413,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
             state: AuctionState.Active
         });
 
-        emit AuctionStarted(auctionIdCounter, msg.sender, tokenId, startAsk, block.timestamp + duration);
+        emit AuctionStarted(auctionIdCounter, msg.sender, tokenId, block.timestamp + duration);
     }
 
     function _placeBid(uint256 auctionId, uint256 amount)
@@ -428,8 +423,6 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
         AuctionData storage auction = auctions[auctionId];
 
         if (_getAuctionState(auction.endTime, auction.state) != AuctionState.Active) revert AuctionNotActive();
-        if (auction.creator == msg.sender) revert Unauthorized();
-        if (auction.startAsk > amount) revert InvalidBidAmount();
 
         // Calculate minimum acceptable bid
         uint256 incrementAmount = (auction.highestBid * auctionConfig.minBidIncrementBps) / BPS_DENOMINATOR;

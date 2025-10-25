@@ -60,7 +60,6 @@ interface IAuction {
     /**
      * @notice Auction state data
      * @param creator Auction creator address
-     * @param startAsk Starting ask price (minimum bid)
      * @param tokenId Collectible cast token ID
      * @param highestBidder Current leader
      * @param highestBid Leading bid (USDC)
@@ -73,7 +72,6 @@ interface IAuction {
     struct AuctionData {
         address creator;
         uint256 tokenId;
-        uint256 startAsk;
         address highestBidder;
         uint256 highestBid;
         uint256 endTime;
@@ -174,12 +172,9 @@ interface IAuction {
      * @param auctionId Unique identifier for the auction
      * @param creator Auction creator's address
      * @param tokenId Token ID of the NFT
-     * @param startAsk Starting ask price
      * @param endTime Auction end timestamp
      */
-    event AuctionStarted(
-        uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 startAsk, uint256 endTime
-    );
+    event AuctionStarted(uint256 indexed auctionId, address indexed creator, uint256 indexed tokenId, uint256 endTime);
 
     /**
      * @notice Emitted when a bid is placed
@@ -299,12 +294,11 @@ interface IAuction {
     /**
      * @notice Start a new auction for a collectible cast
      * @param tokenId Token ID of the collectible cast
-     * @param startAsk Starting ask price by the creator
      * @param duration Duration for the auction
      * @return auctionId Unique identifier for the created auction
      * @dev Caller must be the owner of the cast and have approved this contract.
      */
-    function startAuction(uint256 tokenId, uint256 startAsk, uint256 duration) external returns (uint256);
+    function startAuction(uint256 tokenId, uint256 duration) external returns (uint256);
 
     /**
      * @notice Place a bid on an active auction
