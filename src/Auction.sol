@@ -3,24 +3,32 @@ pragma solidity 0.8.30;
 
 import {IAuction} from "./interfaces/IAuction.sol";
 import {ICollectibleCasts} from "./interfaces/ICollectibleCasts.sol";
-import {Pausable} from "openzeppelin-contracts/contracts/utils/Pausable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
-import {ERC721Holder} from "openzeppelin-contracts/contracts/token/ERC721/utils/ERC721Holder.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {IERC20Permit} from "openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {ERC721HolderUpgradeable} from
+    "@openzeppelin/contracts-upgradeable/token/ERC721/utils/ERC721HolderUpgradeable.sol";
 
-contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Holder {
+contract Auction is
+    IAuction,
+    Ownable2StepUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    ERC721HolderUpgradeable
+{
     /// @dev Basis points denominator (10,000 = 100%)
     uint16 internal constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Collectible NFT contract
-    ICollectibleCasts public immutable collectible;
+    ICollectibleCasts public collectible;
     /// @notice USDC token
-    IERC20 public immutable usdc;
+    IERC20 public usdc;
 
     /// @notice Protocol fee recipient address
     address public treasury;
+
     /// @notice Global auction configuration parameters
     AuctionConfig public auctionConfig;
     /// @notice Global listing configuration parameters
@@ -43,15 +51,24 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
      * @param _treasury Fee recipient
      * @param _owner Contract owner
      */
-    constructor(address _collectibleCast, address _usdc, address _treasury, address _owner) Ownable(_owner) {
+    function initialize(address _collectibleCast, address _usdc, address _treasury, address _owner)
+        external
+        initializer
+    {
         if (_collectibleCast == address(0)) revert InvalidAddress();
         if (_usdc == address(0)) revert InvalidAddress();
         if (_treasury == address(0)) revert InvalidAddress();
         if (_owner == address(0)) revert InvalidAddress();
 
+        __Ownable2Step_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __ERC721Holder_init();
+
         collectible = ICollectibleCasts(_collectibleCast);
         usdc = IERC20(_usdc);
         treasury = _treasury;
+        _transferOwnership(_owner);
 
         auctionConfig = AuctionConfig({
             minBidAmount: 1e6, // 1 USDC
@@ -111,12 +128,7 @@ contract Auction is IAuction, Ownable2Step, Pausable, ReentrancyGuard, ERC721Hol
     }
 
     /// @inheritdoc IAuction
-    function startAuction(uint256 tokenId, uint256 duration)
-        external
-        whenNotPaused
-        nonReentrant
-        returns (uint256)
-    {
+    function startAuction(uint256 tokenId, uint256 duration) external whenNotPaused nonReentrant returns (uint256) {
         if (duration < auctionConfig.minDuration || duration > auctionConfig.maxDuration) {
             revert InvalidAuctionDuration();
         }
