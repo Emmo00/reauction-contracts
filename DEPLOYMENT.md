@@ -35,17 +35,45 @@ NETWORK=mainnet forge script script/Auction.s.sol:Deploy --rpc-url base_mainnet 
 
 ## Upgrades
 
+### Understanding Reference Contracts
+
+When upgrading contracts, OpenZeppelin requires specifying what contract the new version upgrades from for safety validation. You have two options:
+
+1. **Skip Safety Checks (Recommended for testnet)**: Use `unsafeSkipAllChecks = true`
+2. **Provide Reference Contract (Recommended for mainnet)**: Specify the previous contract version
+
 ### Testnet Upgrade
 ```bash
 # Update TESTNET_PROXY in .env with the proxy address first
 ./upgrade-testnet.sh
 ```
 
+The testnet upgrade automatically skips safety checks for faster iteration.
+
 ### Mainnet Upgrade
 ```bash
 # Update MAINNET_PROXY in .env with the proxy address first
 ./upgrade-mainnet.sh
 ```
+
+For mainnet, you have options:
+1. **Skip checks** (current default): Fast but less safe
+2. **Use reference contract**: Add the previous version for validation
+
+To use reference contracts for mainnet, edit the upgrade script and uncomment:
+```solidity
+opts.referenceContract = "previous-version:Auction";
+```
+
+### Alternative: Add Annotation to Contract
+
+Instead of configuring in the script, you can add this annotation to your contract:
+```solidity
+/// @custom:oz-upgrades-from Auction
+contract AuctionV2 is ... {
+```
+
+However, this requires modifying your source code, which you mentioned wanting to avoid.
 
 ## Environment Variables Reference
 

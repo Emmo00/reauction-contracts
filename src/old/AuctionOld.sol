@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {IAuction} from "./interfaces/IAuction.sol";
-import {ICollectibleCasts} from "./interfaces/ICollectibleCasts.sol";
+import {IAuction} from "../interfaces/IAuction.sol";
+import {ICollectibleCasts} from "../interfaces/ICollectibleCasts.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -16,8 +16,7 @@ import {ERC721HolderUpgradeable} from
  * @author Emmo00
  * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
  */
-/// @custom:oz-upgrades-from AuctionOld
-contract Auction is
+contract AuctionOld is
     IAuction,
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -387,6 +386,7 @@ contract Auction is
     {
         ListingData storage listing = listings[listingId];
         if (listing.state != ListingState.Active) revert ListingNotActive();
+        if (listing.creator == msg.sender) revert Unauthorized();
 
         listingPrice = listing.price;
         protocolFeeBps = listing.protocolFeeBps;
