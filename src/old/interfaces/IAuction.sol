@@ -17,6 +17,7 @@ interface IAuction {
      * @param minDuration Minimum auction duration (seconds)
      * @param maxDuration Maximum auction duration (seconds)
      * @param extension Time to extend auction if bid placed near end (seconds)
+     * @param maxExtension Maximum total auction extension time (seconds)
      * @param extensionThreshold Time before auction end to trigger extension (seconds)
      * @param protocolFeeBps Protocol fee in basis points (bps)
      */
@@ -26,6 +27,7 @@ interface IAuction {
         uint32 minDuration;
         uint32 maxDuration;
         uint32 extension;
+        uint256 maxExtension;
         uint32 extensionThreshold;
         uint16 protocolFeeBps;
     }
@@ -59,6 +61,7 @@ interface IAuction {
         uint256 highestBid;
         uint256 endTime;
         uint32 bids;
+        uint256 extension;
         uint16 protocolFeeBps;
         AuctionState state;
     }

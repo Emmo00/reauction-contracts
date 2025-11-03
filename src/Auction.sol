@@ -16,7 +16,7 @@ import {ERC721HolderUpgradeable} from
  * @author Emmo00
  * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
  */
-/// @custom:oz-upgrades-from AuctionOld
+/// @custom:oz-upgrades-from old/Auction
 contract Auction is
     IAuction,
     OwnableUpgradeable,
