@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to copy src directory structure to src/old
+# Script to copy src directory structure to src/old and rename Auction to AuctionOld in the copy
 # Author: Generated script
 # Date: $(date)
 
@@ -31,12 +31,23 @@ fi
 echo "Copying files..."
 rsync -av --exclude='old' "$SRC_DIR/" "$TARGET_DIR/"
 
-# Alternative method using cp (commented out)
-# cp -r "$SRC_DIR"/* "$TARGET_DIR/" 2>/dev/null || true
-# But we need to exclude old directory manually
+# Rename Auction.sol to AuctionOld.sol in the copied version
+if [ -f "$TARGET_DIR/Auction.sol" ]; then
+    echo "Renaming Auction.sol to AuctionOld.sol in old directory..."
+    mv "$TARGET_DIR/Auction.sol" "$TARGET_DIR/AuctionOld.sol"
+    
+    # Update contract name inside the copied file
+    if command -v sed &> /dev/null; then
+        echo "Updating contract name from 'contract Auction' to 'contract AuctionOld' in copied file..."
+        sed -i 's/contract Auction/contract AuctionOld/g' "$TARGET_DIR/AuctionOld.sol"
+    else
+        echo "Warning: sed not available, contract name not updated in file contents"
+    fi
+fi
 
 echo "Copy operation completed successfully!"
 echo "Files copied to: $TARGET_DIR"
+echo "Original files remain in: $SRC_DIR"
 
 # List the contents of the target directory
 echo ""

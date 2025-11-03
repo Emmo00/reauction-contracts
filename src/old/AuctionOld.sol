@@ -16,8 +16,8 @@ import {ERC721HolderUpgradeable} from
  * @author Emmo00
  * @notice Ascending escrowed USDC auction and Fixed Listing for Farcaster collectible casts
  */
-/// @custom:oz-upgrades-from AuctionOld
-contract Auction is
+/// @custom:oz-upgrades-from src/old/Auction.sol:Auction
+contract AuctionOld is
     IAuction,
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -57,10 +57,7 @@ contract Auction is
      * @param _treasury Fee recipient
      * @param _owner Contract owner
      */
-    function initialize(address _collectible, address _usdc, address _treasury, address _owner)
-        external
-        initializer
-    {
+    function initialize(address _collectible, address _usdc, address _treasury, address _owner) external initializer {
         if (_collectible == address(0)) revert InvalidAddress();
         if (_usdc == address(0)) revert InvalidAddress();
         if (_treasury == address(0)) revert InvalidAddress();
@@ -81,7 +78,6 @@ contract Auction is
             minDuration: 1 hours,
             maxDuration: 30 days,
             extension: 15 minutes,
-            maxExtension: 52 weeks,
             extensionThreshold: 15 minutes,
             protocolFeeBps: uint16(1000) // 10%
         });
@@ -269,7 +265,6 @@ contract Auction is
             highestBid: auction.highestBid,
             endTime: auction.endTime,
             bids: auction.bids,
-            extension: auction.extension,
             protocolFeeBps: auction.protocolFeeBps,
             state: currentState
         });
@@ -427,7 +422,6 @@ contract Auction is
             highestBid: 0,
             endTime: block.timestamp + duration,
             bids: 0,
-            extension: 0,
             protocolFeeBps: auctionConfig.protocolFeeBps,
             state: AuctionState.Active
         });
@@ -456,15 +450,9 @@ contract Auction is
         auction.bids++;
 
         // Extend auction if within extension threshold
-        if (
-            auction.endTime - block.timestamp <= auctionConfig.extensionThreshold
-                && auction.extension < auctionConfig.maxExtension
-        ) {
-            uint32 extension = auctionConfig.extension;
-
-            auction.endTime += extension;
-            auction.extension += extension;
-            emit AuctionExtended(auctionId, auction.endTime);
+        if (auction.endTime - block.timestamp <= auctionConfig.extensionThreshold) {
+            auction.endTime += auctionConfig.extension;
+            emit AuctionExtended(auctionId, auctionConfig.extension, auction.endTime);
         }
 
         emit BidPlaced(auctionId, auction.tokenId, msg.sender, amount);

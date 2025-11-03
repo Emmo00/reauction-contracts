@@ -185,9 +185,10 @@ interface IAuction {
     /**
      * @notice Emitted when auction end time is extended
      * @param auctionId Unique identifier of the auction
+     * @param extension Extension duration in seconds
      * @param newEndTime New auction end timestamp
      */
-    event AuctionExtended(uint256 indexed auctionId, uint256 newEndTime);
+    event AuctionExtended(uint256 indexed auctionId, uint256 extension, uint256 newEndTime);
 
     /**
      * @notice Emitted when an auction is settled
