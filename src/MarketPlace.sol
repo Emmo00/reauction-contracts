@@ -139,7 +139,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
             state: AuctionState.Active
         });
 
-        _collectNFT(tokenId, seller);
+        _collectNft(tokenId, seller);
 
         emit AuctionStarted(tokenId, auctionCounter, seller, duration);
     }
@@ -210,7 +210,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         }
 
         // return NFT to seller
-        _pushNFT(address(this), seller, tokenId);
+        _pushNft(address(this), seller, tokenId);
 
         emit AuctionCancelled(tokenId, auctionId);
     }
@@ -235,7 +235,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         // Interactions
         if (highestBid > 0 && highestBidder != address(0)) {
             // send out NFT to highest bidder
-            _pushNFT(address(this), highestBidder, tokenId);
+            _pushNft(address(this), highestBidder, tokenId);
 
             // push payment to seller (not bidder)
             uint256 protocolFee = _calculatePercentageOf(highestBid, protocolFeeBps);
@@ -245,7 +245,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
             _pushPayment(seller, amountToSettle);
         } else {
             // no bids — return NFT to seller
-            _pushNFT(address(this), seller, tokenId);
+            _pushNft(address(this), seller, tokenId);
         }
 
         emit AuctionSettled(tokenId, auctionId);
@@ -268,7 +268,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
             Listing({seller: seller, buyer: address(0), price: price, state: ListingState.Active});
 
         // Interactions
-        _collectNFT(tokenId, seller);
+        _collectNft(tokenId, seller);
 
         emit ListingCreated(tokenId, listingCounter, seller, price);
     }
@@ -297,7 +297,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
 
         // Interactions
         _collectPayment(price, buyer);
-        _pushNFT(address(this), buyer, tokenId);
+        _pushNft(address(this), buyer, tokenId);
 
         // push payment to seller (not buyer)
         _pushPayment(seller, amountToSettle);
@@ -321,7 +321,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         isTokenOnSale[tokenId] = false;
 
         // Interactions: push nft back to the seller
-        _pushNFT(address(this), seller, tokenId);
+        _pushNft(address(this), seller, tokenId);
 
         emit ListingCancelled(tokenId, listingId, endTime);
     }
@@ -334,11 +334,11 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         require(USDC.transfer(receiver, amount), "Failed to push payment");
     }
 
-    function _collectNFT(uint256 tokenId, address owner) internal {
+    function _collectNft(uint256 tokenId, address owner) internal {
         COLLECTIBLES.safeTransferFrom(owner, address(this), tokenId);
     }
 
-    function _pushNFT(address owner, address receiver, uint256 tokenId) internal {
+    function _pushNft(address owner, address receiver, uint256 tokenId) internal {
         COLLECTIBLES.transferFrom(owner, receiver, tokenId);
     }
 
