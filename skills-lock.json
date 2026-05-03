@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "solidity-security-audit": {
+      "source": "mariano-aguero/solidity-security-audit-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "f37278f4eb15dfbe8442f32b2b3956e16e8c145ed96321c0a9dde68038551c50"
+    }
+  }
+}

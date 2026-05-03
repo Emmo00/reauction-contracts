@@ -1,0 +1,1104 @@
+# ERC-4337 Account Abstraction Security
+
+Security patterns for Account Abstraction (ERC-4337) implementations including
+smart accounts, bundlers, paymasters, and entry point interactions.
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│    User     │────▶│   Bundler   │────▶│ Entry Point │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                               │
+                    ┌──────────────────────────┼──────────────────────────┐
+                    │                          │                          │
+                    ▼                          ▼                          ▼
+             ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
+             │   Account   │           │  Paymaster  │           │   Factory   │
+             │  (Wallet)   │           │             │           │             │
+             └─────────────┘           └─────────────┘           └─────────────┘
+```
+
+| Component | Role | Security Focus |
+|-----------|------|----------------|
+| **UserOperation** | Transaction intent | Signature, nonce, gas limits |
+| **Bundler** | Aggregates & submits UserOps | DoS, front-running, censorship |
+| **Entry Point** | Singleton executor | Reentrancy, validation |
+| **Account** | Smart contract wallet | Access control, upgrade safety |
+| **Paymaster** | Sponsors gas | Drain attacks, validation |
+| **Factory** | Deploys accounts | Deterministic addresses, init |
+
+---
+
+## UserOperation Structure
+
+```solidity
+struct UserOperation {
+    address sender;           // Account address
+    uint256 nonce;            // Anti-replay
+    bytes initCode;           // Factory + init data (if deploying)
+    bytes callData;           // Execution payload
+    uint256 callGasLimit;     // Gas for execution
+    uint256 verificationGasLimit; // Gas for validation
+    uint256 preVerificationGas;   // Bundler overhead
+    uint256 maxFeePerGas;     // EIP-1559 max fee
+    uint256 maxPriorityFeePerGas; // EIP-1559 priority
+    bytes paymasterAndData;   // Paymaster address + data
+    bytes signature;          // Account signature
+}
+```
+
+---
+
+### UserOperation v0.7 — PackedUserOperation
+
+EntryPoint v0.7 (address `0x0000000071727De22E5E9d8BAf0edAc6f37da032`) uses a
+**packed struct** that merges several fields to reduce calldata cost:
+
+```solidity
+struct PackedUserOperation {
+    address sender;
+    uint256 nonce;
+    bytes initCode;           // factory ++ factoryData (ABI packed, not encoded)
+    bytes callData;
+    bytes32 accountGasLimits; // verificationGasLimit (128 bits) ++ callGasLimit (128 bits)
+    uint256 preVerificationGas;
+    bytes32 gasFees;          // maxPriorityFeePerGas (128 bits) ++ maxFeePerGas (128 bits)
+    bytes paymasterAndData;   // paymaster (20 bytes) ++ paymasterVerificationGasLimit (16 bytes)
+                              //   ++ paymasterPostOpGasLimit (16 bytes) ++ paymasterData
+    bytes signature;
+}
+```
+
+**Key differences from v0.6 → v0.7:**
+
+| Field | v0.6 | v0.7 |
+|-------|------|------|
+| Gas fields | 3 separate uint256 | Packed into 2 bytes32 |
+| Paymaster gas | Not explicit | Two separate gas limits in paymasterAndData |
+| initCode | factory ++ initData | Same packing, same risk |
+| Validation return | `uint256` (sigFail bit + time range) | Same format, but new helper `_packValidationData()` |
+
+**Security implications of packed fields:**
+
+```solidity
+// CORRECT bit extraction from accountGasLimits
+uint128 verifGas = uint128(userOp.accountGasLimits >> 128);
+uint128 callGas  = uint128(userOp.accountGasLimits);
+
+// VULNERABLE: assuming field layout without checking EP version
+// If your contract reads v0.6 struct fields from a v0.7 UserOp, all values will be wrong
+
+// SECURE: use the EP's own helpers
+(uint256 verif, uint256 call) = UserOperationLib.unpackAccountGasLimits(userOp.accountGasLimits);
+```
+
+**Paymaster gas decoding (v0.7 only):**
+
+```solidity
+// paymasterAndData layout (v0.7):
+// [0:20]   paymaster address
+// [20:36]  paymasterVerificationGasLimit (uint128)
+// [36:52]  paymasterPostOpGasLimit (uint128)
+// [52:]    paymasterData (arbitrary)
+
+function _parsePaymasterData(bytes calldata paymasterAndData)
+    internal pure returns (
+        address paymaster,
+        uint128 verificationGasLimit,
+        uint128 postOpGasLimit,
+        bytes calldata data
+    )
+{
+    paymaster = address(bytes20(paymasterAndData[:20]));
+    verificationGasLimit = uint128(bytes16(paymasterAndData[20:36]));
+    postOpGasLimit = uint128(bytes16(paymasterAndData[36:52]));
+    data = paymasterAndData[52:];
+}
+```
+
+**Migration audit checklist (v0.6 → v0.7):**
+- [ ] Contract imports `IEntryPoint` from `@account-abstraction/contracts@0.7.x`
+- [ ] Uses `PackedUserOperation` not `UserOperation`
+- [ ] Gas limits extracted with `UserOperationLib` helpers, not hardcoded offsets
+- [ ] Paymaster validates both `paymasterVerificationGasLimit` and `paymasterPostOpGasLimit`
+- [ ] No hardcoded EntryPoint address — uses a configurable/constructor parameter
+- [ ] Test suite forks against v0.7 EntryPoint address, not v0.6
+
+---
+
+## Account (Wallet) Vulnerabilities
+
+### 1. Signature Validation Bypass
+
+```solidity
+// VULNERABLE: Missing signature validation
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256 validationData) {
+    // No signature check!
+    _payPrefund(missingAccountFunds);
+    return 0; // Valid
+}
+
+// SECURE: Proper signature validation
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256 validationData) {
+    // Only Entry Point can call
+    require(msg.sender == entryPoint, "Not from EntryPoint");
+
+    // Validate signature
+    bytes32 hash = userOpHash.toEthSignedMessageHash();
+    address recovered = hash.recover(userOp.signature);
+
+    if (recovered != owner) {
+        return SIG_VALIDATION_FAILED; // 1
+    }
+
+    _payPrefund(missingAccountFunds);
+    return 0; // Valid
+}
+```
+
+### 2. Missing Entry Point Check
+
+```solidity
+// VULNERABLE: Anyone can call validateUserOp
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256) {
+    // Missing: require(msg.sender == entryPoint)
+    // Attacker can drain prefund
+}
+
+// SECURE: Restrict to Entry Point
+modifier onlyEntryPoint() {
+    require(msg.sender == address(entryPoint), "Not EntryPoint");
+    _;
+}
+
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external onlyEntryPoint returns (uint256) {
+    // Safe
+}
+```
+
+### 3. Execution Without Validation
+
+```solidity
+// VULNERABLE: execute() callable by anyone
+function execute(
+    address dest,
+    uint256 value,
+    bytes calldata data
+) external {
+    // No access control!
+    (bool success,) = dest.call{value: value}(data);
+    require(success);
+}
+
+// SECURE: Only Entry Point or self
+function execute(
+    address dest,
+    uint256 value,
+    bytes calldata data
+) external {
+    require(
+        msg.sender == address(entryPoint) || msg.sender == address(this),
+        "Unauthorized"
+    );
+    (bool success,) = dest.call{value: value}(data);
+    require(success);
+}
+```
+
+### 4. Upgrade Vulnerabilities
+
+```solidity
+// VULNERABLE: Owner can upgrade to malicious implementation
+function upgradeTo(address newImpl) external onlyOwner {
+    _upgradeTo(newImpl);
+}
+
+// SECURE: Timelock for upgrades
+uint256 public constant UPGRADE_DELAY = 2 days;
+mapping(address => uint256) public pendingUpgrades;
+
+function proposeUpgrade(address newImpl) external onlyOwner {
+    pendingUpgrades[newImpl] = block.timestamp + UPGRADE_DELAY;
+    emit UpgradeProposed(newImpl);
+}
+
+function executeUpgrade(address newImpl) external onlyOwner {
+    require(pendingUpgrades[newImpl] != 0, "Not proposed");
+    require(block.timestamp >= pendingUpgrades[newImpl], "Too early");
+
+    delete pendingUpgrades[newImpl];
+    _upgradeTo(newImpl);
+}
+```
+
+---
+
+## Paymaster Vulnerabilities
+
+### 1. Unbounded Gas Sponsorship (Drain Attack)
+
+```solidity
+// VULNERABLE: No limits on sponsorship
+function validatePaymasterUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 maxCost
+) external returns (bytes memory context, uint256 validationData) {
+    // Sponsors anyone without limits
+    return ("", 0);
+}
+
+// SECURE: Rate limiting and allowlists
+mapping(address => uint256) public dailySponsored;
+mapping(address => uint256) public lastSponsorDay;
+uint256 public constant DAILY_LIMIT = 0.1 ether;
+
+function validatePaymasterUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 maxCost
+) external returns (bytes memory context, uint256 validationData) {
+    address sender = userOp.sender;
+
+    // Reset daily limit
+    uint256 today = block.timestamp / 1 days;
+    if (lastSponsorDay[sender] < today) {
+        dailySponsored[sender] = 0;
+        lastSponsorDay[sender] = today;
+    }
+
+    // Check limit
+    require(
+        dailySponsored[sender] + maxCost <= DAILY_LIMIT,
+        "Daily limit exceeded"
+    );
+
+    dailySponsored[sender] += maxCost;
+    return (abi.encode(sender, maxCost), 0);
+}
+```
+
+### 2. Missing postOp Validation
+
+```solidity
+// VULNERABLE: postOp doesn't verify actual cost
+function _postOp(
+    PostOpMode mode,
+    bytes calldata context,
+    uint256 actualGasCost
+) internal override {
+    // Doesn't check if user paid their share
+}
+
+// SECURE: Verify and charge user
+function _postOp(
+    PostOpMode mode,
+    bytes calldata context,
+    uint256 actualGasCost
+) internal override {
+    (address sender, uint256 maxCost) = abi.decode(context, (address, uint256));
+
+    if (mode == PostOpMode.postOpReverted) {
+        // Handle revert case
+        return;
+    }
+
+    // Charge user's deposit or token balance
+    uint256 userShare = actualGasCost * userSharePercent / 100;
+    require(
+        deposits[sender] >= userShare,
+        "Insufficient deposit"
+    );
+    deposits[sender] -= userShare;
+}
+```
+
+### 3. Token Paymaster Price Manipulation
+
+```solidity
+// VULNERABLE: Uses spot price for token payment
+function validatePaymasterUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 maxCost
+) external returns (bytes memory, uint256) {
+    // Get current price from DEX
+    uint256 tokenPrice = getSpotPrice(); // Manipulatable!
+
+    uint256 tokenCost = maxCost * 1e18 / tokenPrice;
+    require(token.balanceOf(userOp.sender) >= tokenCost);
+
+    return (abi.encode(tokenCost), 0);
+}
+
+// SECURE: Use oracle with staleness check
+function validatePaymasterUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 maxCost
+) external returns (bytes memory, uint256) {
+    // Use Chainlink oracle
+    (, int256 price,, uint256 updatedAt,) = priceFeed.latestRoundData();
+    require(price > 0, "Invalid price");
+    require(block.timestamp - updatedAt < 1 hours, "Stale price");
+
+    uint256 tokenCost = maxCost * 1e18 / uint256(price);
+    // Add buffer for price movement
+    tokenCost = tokenCost * 105 / 100; // 5% buffer
+
+    require(token.balanceOf(userOp.sender) >= tokenCost);
+
+    return (abi.encode(tokenCost), 0);
+}
+```
+
+---
+
+## Factory Vulnerabilities
+
+### 1. Non-Deterministic Addresses
+
+```solidity
+// VULNERABLE: Address depends on block data
+function createAccount(address owner) external returns (address) {
+    bytes32 salt = keccak256(abi.encodePacked(owner, block.timestamp));
+    // Address unpredictable - breaks initCode
+    return address(new Account{salt: salt}(owner, entryPoint));
+}
+
+// SECURE: Deterministic address from owner + salt
+function createAccount(
+    address owner,
+    uint256 salt
+) external returns (address) {
+    bytes32 actualSalt = keccak256(abi.encodePacked(owner, salt));
+    return address(new Account{salt: actualSalt}(owner, entryPoint));
+}
+
+function getAddress(
+    address owner,
+    uint256 salt
+) public view returns (address) {
+    bytes32 actualSalt = keccak256(abi.encodePacked(owner, salt));
+    return Create2.computeAddress(
+        actualSalt,
+        keccak256(abi.encodePacked(
+            type(Account).creationCode,
+            abi.encode(owner, entryPoint)
+        ))
+    );
+}
+```
+
+### 2. Front-Running Account Creation
+
+```solidity
+// VULNERABLE: Attacker can front-run with different owner
+function createAccount(bytes32 salt) external returns (address) {
+    // Salt doesn't include msg.sender or owner
+    return address(new Account{salt: salt}(msg.sender, entryPoint));
+}
+
+// SECURE: Salt includes owner
+function createAccount(
+    address owner,
+    uint256 salt
+) external returns (address) {
+    // Owner is part of salt - can't front-run with different owner
+    bytes32 actualSalt = keccak256(abi.encodePacked(owner, salt));
+    return address(new Account{salt: actualSalt}(owner, entryPoint));
+}
+```
+
+---
+
+## Nonce Management
+
+### 1. Nonce Replay Across Keys
+
+```solidity
+// ERC-4337 uses 2D nonces: key (192 bits) + sequence (64 bits)
+// Each key has its own sequence
+
+// VULNERABLE: Single key for all operations
+function validateUserOp(...) external {
+    // Uses only the sequence part
+    require(userOp.nonce == nonces[sender]++);
+}
+
+// SECURE: Support 2D nonces for parallel transactions
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256) {
+    uint192 key = uint192(userOp.nonce >> 64);
+    uint64 seq = uint64(userOp.nonce);
+
+    require(seq == nonces[key], "Invalid nonce");
+    nonces[key]++;
+
+    // Continue validation...
+}
+```
+
+### 2. Cross-Chain Nonce Replay
+
+```solidity
+// VULNERABLE: Same nonce valid on multiple chains
+function validateUserOp(...) external {
+    bytes32 hash = keccak256(abi.encode(userOp));
+    // No chain ID in hash!
+}
+
+// SECURE: Include chain ID in hash (Entry Point does this)
+// The Entry Point already includes chainId in userOpHash
+// But custom validation must also consider it
+
+function _validateSignature(
+    UserOperation calldata userOp,
+    bytes32 userOpHash // Already includes chainId from EntryPoint
+) internal view returns (bool) {
+    // userOpHash is safe to use directly
+    return owner == userOpHash.toEthSignedMessageHash().recover(userOp.signature);
+}
+```
+
+---
+
+## Bundler Considerations
+
+### 1. Simulation vs Execution Discrepancy
+
+```solidity
+// VULNERABLE: Different behavior in simulation vs execution
+function validateUserOp(...) external returns (uint256) {
+    // Bundlers simulate with eth_call
+    // This check passes in simulation but fails on-chain
+    if (block.basefee > maxBaseFee) {
+        return SIG_VALIDATION_FAILED;
+    }
+}
+
+// Storage access rules (ERC-7562):
+// - Can only access sender's storage
+// - Can only access paymaster's storage (if using paymaster)
+// - Cannot access other accounts' storage during validation
+
+// VULNERABLE: Accesses external storage
+function validateUserOp(...) external returns (uint256) {
+    // Bundler will reject - accesses external contract
+    uint256 price = oracle.getPrice();
+}
+```
+
+### 2. Gas Griefing
+
+```solidity
+// VULNERABLE: Validation uses excessive gas
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256) {
+    // Expensive operations in validation
+    for (uint i = 0; i < 1000; i++) {
+        keccak256(abi.encode(i));
+    }
+}
+
+// Keep validation gas-efficient
+// verificationGasLimit should be minimal
+```
+
+---
+
+## Signature Schemes
+
+### 1. EIP-1271 Smart Contract Signatures
+
+```solidity
+// For accounts that are already smart contracts
+function isValidSignature(
+    bytes32 hash,
+    bytes memory signature
+) external view returns (bytes4) {
+    // Validate signature
+    if (_isValidSignature(hash, signature)) {
+        return IERC1271.isValidSignature.selector; // 0x1626ba7e
+    }
+    return 0xffffffff;
+}
+
+// VULNERABLE: No replay protection in isValidSignature
+function isValidSignature(
+    bytes32 hash,
+    bytes memory signature
+) external view returns (bytes4) {
+    // Same signature valid for any hash!
+    if (signature.length == 65) {
+        return 0x1626ba7e;
+    }
+}
+```
+
+### 2. Multi-Signature Accounts
+
+```solidity
+// SECURE: Threshold signature validation
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external onlyEntryPoint returns (uint256) {
+    bytes32 hash = userOpHash.toEthSignedMessageHash();
+
+    // Decode multiple signatures
+    bytes[] memory signatures = abi.decode(userOp.signature, (bytes[]));
+    require(signatures.length >= threshold, "Not enough signatures");
+
+    address lastSigner = address(0);
+    for (uint i = 0; i < threshold; i++) {
+        address signer = hash.recover(signatures[i]);
+        require(isOwner[signer], "Invalid signer");
+        require(signer > lastSigner, "Duplicate or unordered"); // Prevent duplicates
+        lastSigner = signer;
+    }
+
+    _payPrefund(missingAccountFunds);
+    return 0;
+}
+```
+
+---
+
+## Session Keys
+
+### 1. Overprivileged Session Keys
+
+```solidity
+// VULNERABLE: Session key can do anything
+mapping(address => bool) public sessionKeys;
+
+function validateUserOp(...) external returns (uint256) {
+    address signer = recoverSigner(userOp);
+    if (owner == signer || sessionKeys[signer]) {
+        return 0; // Valid - but session key has full access!
+    }
+}
+
+// SECURE: Scoped session keys
+struct SessionKey {
+    address key;
+    address[] allowedTargets;
+    bytes4[] allowedSelectors;
+    uint256 validUntil;
+    uint256 maxValue;
+}
+
+mapping(bytes32 => SessionKey) public sessionKeys;
+
+function validateUserOp(
+    UserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 missingAccountFunds
+) external returns (uint256) {
+    address signer = recoverSigner(userOp, userOpHash);
+
+    if (signer == owner) {
+        _payPrefund(missingAccountFunds);
+        return 0;
+    }
+
+    // Check session key permissions
+    bytes32 keyId = keccak256(abi.encodePacked(signer));
+    SessionKey storage session = sessionKeys[keyId];
+
+    require(session.key == signer, "Invalid session key");
+    require(block.timestamp <= session.validUntil, "Session expired");
+
+    // Validate target and selector
+    (address target, uint256 value, bytes4 selector) = _parseCallData(userOp.callData);
+    require(_isAllowed(session, target, selector), "Not allowed");
+    require(value <= session.maxValue, "Value too high");
+
+    _payPrefund(missingAccountFunds);
+    return 0;
+}
+```
+
+---
+
+## Checklist: Account Abstraction Audit
+
+### Account (Wallet)
+- [ ] `validateUserOp` only callable by Entry Point
+- [ ] Signature validation is correct (EIP-712 or EIP-191)
+- [ ] Nonce handling prevents replay
+- [ ] `execute` only callable by Entry Point or self
+- [ ] Upgrade mechanism has timelock or multi-sig
+- [ ] Recovery mechanism is secure
+- [ ] Session keys are properly scoped
+
+### Paymaster
+- [ ] Rate limiting prevents drain attacks
+- [ ] Token pricing uses secure oracle
+- [ ] `postOp` handles all failure modes
+- [ ] Stake/unstake has appropriate delays
+- [ ] Validates sender is legitimate account
+
+### Factory
+- [ ] Address is deterministic (CREATE2)
+- [ ] Salt includes owner to prevent front-running
+- [ ] `getAddress` matches actual deployment
+- [ ] Initialization is atomic with deployment
+
+### General
+- [ ] No storage access violations (ERC-7562)
+- [ ] Gas limits are reasonable
+- [ ] Chain ID included in signatures
+- [ ] Handles Entry Point upgrades gracefully
+
+### EntryPoint Version
+
+- [ ] Identify which EntryPoint version the protocol targets (v0.6 = `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`, v0.7 = `0x0000000071727De22E5E9d8BAf0edAc6f37da032`)
+- [ ] If v0.7: verify `PackedUserOperation` is used, not `UserOperation`
+- [ ] If v0.7: verify paymaster parses the 3-field prefix of `paymasterAndData` correctly
+- [ ] No contract hardcodes EntryPoint address as a constant without upgrade path
+
+---
+
+## EIP-7701 — Native Account Abstraction (Draft)
+
+**Status**: Draft / under active discussion | **Risk**: Protocol-level AA design
+
+EIP-7701 proposes native AA by adding a new transaction type (`AA_TX_TYPE`) and
+a new `ACCEPT_ROLE` opcode to the EVM. Unlike ERC-4337's off-chain mempool design,
+EIP-7701 validators would be invoked at the protocol level by the EVM itself.
+
+### Security Risks
+
+**1. Legacy contracts with `ACCEPT_ROLE` bytecode accidentally become AA validators**
+
+If EIP-7701 activates with `ACCEPT_ROLE` at an opcode value that currently maps to
+an existing opcode (or `INVALID`), any deployed contract containing that byte could
+become an unintentional AA validation entry point.
+
+```
+Concern: Opcode 0xFE is currently `INVALID` (always reverts).
+If EIP-7701 repurposes 0xFE or an adjacent opcode as ACCEPT_ROLE,
+legacy contracts compiled against older EVM specs may contain it accidentally.
+
+A contract that becomes an AA validator can:
+- Approve malicious UserOperations signed by the attacker
+- Block legitimate UserOperations (DoS)
+- Leak validation context to attackers
+```
+
+**2. Validation storage restrictions differ from ERC-4337**
+
+ERC-4337 validation is restricted via ERC-7562 simulation rules (no `SLOAD` of
+associated storage outside a narrow set). EIP-7701 native validation may impose
+different or weaker storage access rules — creating new frontrunning opportunities
+during the validation phase.
+
+**3. Trust model changes for smart contract wallets**
+
+In ERC-4337, the Entry Point is a well-audited singleton. With native AA (EIP-7701),
+the EVM itself calls into the validator contract. A validator that was correct under
+ERC-4337 assumptions may fail under native AA (e.g., different gas model, different
+`msg.sender`, different available context).
+
+### What to Check (if auditing a protocol that anticipates EIP-7701)
+
+- [ ] Does the wallet implementation assume `msg.sender == ENTRY_POINT_V0_7`? Native AA changes the caller.
+- [ ] Is there a migration path if the wallet needs to transition from ERC-4337 to native AA?
+- [ ] Does any assembly code in the contract contain bytes that could be misinterpreted as `ACCEPT_ROLE` on EIP-7701 activation?
+- [ ] Is validation logic isolated from execution logic? (Native AA separates them more strictly)
+
+> **Note**: EIP-7701 is a draft as of 2025. Monitor [eips.ethereum.org/EIPS/eip-7701](https://eips.ethereum.org/EIPS/eip-7701)
+> for finalization. Do not architect production systems around its specifics until stable.
+
+---
+
+## Common Attack Vectors
+
+| Attack | Description | Prevention |
+|--------|-------------|------------|
+| **Signature Replay** | Reuse signature on different chain/nonce | Include chainId, use 2D nonces |
+| **Paymaster Drain** | Exhaust paymaster funds with spam | Rate limiting, allowlists |
+| **Front-Running Deploy** | Attacker deploys with different owner | Include owner in CREATE2 salt |
+| **Validation Bypass** | Skip validation checks | Strict Entry Point checks |
+| **Session Key Abuse** | Overprivileged session keys | Scope keys to targets/selectors |
+| **Gas Griefing** | Waste bundler gas | Efficient validation, reputation |
+| **Storage Access** | Access disallowed storage | Follow ERC-7562 rules |
+
+---
+
+## EIP-7579 — Modular Smart Accounts
+
+EIP-7579 standardizes how **modules** attach to smart accounts. As of 2025, the
+major wallets (Kernel/ZeroDev, Alchemy Modular Account, Biconomy Nexus, Safe7579)
+all implement it. Auditing a modular account adds new attack surfaces beyond ERC-4337.
+
+### Module Types and Risks
+
+| Module Type | Role | Key Risks |
+|-------------|------|-----------|
+| **Validator** | Signature verification | Bypass validation, replay across accounts |
+| **Executor** | Execute arbitrary calls | Unbounded permissions, reentrancy |
+| **Fallback** | Handle unknown calldata | Selector collision with account functions |
+| **Hook** | Pre/post execution checks | Hook ordering bugs, DoS via reverting hook |
+
+### Installation Race Condition
+
+```solidity
+// VULNERABLE: no check if module is already installed
+function installModule(uint256 moduleType, address module, bytes calldata data)
+    external onlyEntryPointOrSelf
+{
+    // If called twice, second install overwrites config without event
+    _modules[moduleType][module] = true;
+    IModule(module).onInstall(data);
+}
+
+// SECURE: guard against re-installation
+function installModule(uint256 moduleType, address module, bytes calldata data)
+    external onlyEntryPointOrSelf
+{
+    require(!_modules[moduleType][module], "Already installed");
+    _modules[moduleType][module] = true;
+    IModule(module).onInstall(data);
+}
+```
+
+### Hook Ordering Manipulation
+
+If hooks run in insertion order and an attacker can install a hook that front-runs
+the real validator, they may intercept or block valid operations. Check:
+- [ ] Hook installation is restricted (only account owner/EntryPoint)
+- [ ] Hook execution order is deterministic and not manipulable
+- [ ] A reverting hook cannot permanently DoS the account (consider try/catch)
+
+### Selector Collision
+
+Fallback modules handle selectors not implemented by the account. An attacker
+could install a fallback that intercepts `execute()` or `validateUserOp()` if
+those functions are not explicitly guarded as native selectors.
+
+```
+[ ] Native account function selectors cannot be registered as fallback handlers
+[ ] Fallback module cannot shadow validator or executor interfaces
+```
+
+### Cross-Account Module Reuse
+
+EIP-7579 modules are deployed once and reused across many accounts. A bug in a
+shared module affects ALL accounts using it.
+
+```
+[ ] Module does not store per-account state in a way that can be cross-contaminated
+[ ] Module initialization (onInstall) isolates state per account address
+[ ] Uninstalling a module fully clears its per-account state
+```
+
+### Module Poisoning via `onUninstall` Revert
+
+A malicious module can make itself **permanently impossible to uninstall** by reverting
+in its `onUninstall` callback. Once installed, the module is trapped in the account forever,
+maintaining whatever privileges it was granted.
+
+```solidity
+// MALICIOUS MODULE: reverts on uninstall, trapping itself permanently
+contract PoisonedModule {
+    function onInstall(bytes calldata) external {}
+
+    function onUninstall(bytes calldata) external pure {
+        revert("you can't remove me");
+        // Account is now permanently compromised — this module stays forever
+    }
+}
+
+// VULNERABLE ACCOUNT: uninstallModule reverts → module remains installed
+// The account has no recovery path; the module retains execution rights indefinitely
+
+// SECURE ACCOUNT: wrap onUninstall in try/catch, forcibly remove on revert
+function uninstallModule(uint256 moduleType, address module, bytes calldata deInitData)
+    external onlyEntryPointOrSelf
+{
+    _modules[moduleType].remove(module);  // Remove from registry FIRST
+    try IModule(module).onUninstall(deInitData) {} catch {
+        // Log the failure but proceed — registry is already updated
+        emit ModuleForceUninstalled(module, moduleType);
+    }
+}
+```
+
+**Checklist:**
+- [ ] Does `uninstallModule` use try/catch around `onUninstall` calls?
+- [ ] Is the module removed from the account's registry BEFORE calling `onUninstall`?
+- [ ] Is there a governance/recovery path if a module cannot be uninstalled?
+
+### Stale State After Module Reinstallation
+
+When a module is uninstalled and reinstalled, residual state from the previous installation
+may persist. A malicious or buggy module can exploit this to regain elevated privileges.
+
+```solidity
+// VULNERABLE: module stores state in account's storage, not cleaned on uninstall
+contract StatefulModule {
+    bytes32 constant ADMIN_SLOT = keccak256("module.admin");
+
+    function onInstall(bytes calldata data) external {
+        // Sets admin in account storage — but doesn't zero out first
+        address newAdmin = abi.decode(data, (address));
+        assembly { sstore(ADMIN_SLOT, newAdmin) }
+    }
+
+    function onUninstall(bytes calldata) external {
+        // Forgets to clean up ADMIN_SLOT → stale state persists after uninstall
+    }
+}
+
+// SECURE: always initialize to clean state on install; zero out on uninstall
+function onInstall(bytes calldata data) external {
+    assembly { sstore(ADMIN_SLOT, 0) }  // Zero out before setting new value
+    address newAdmin = abi.decode(data, (address));
+    assembly { sstore(ADMIN_SLOT, newAdmin) }
+}
+
+function onUninstall(bytes calldata) external {
+    assembly { sstore(ADMIN_SLOT, 0) }  // Explicitly clean up all state
+}
+```
+
+### Executor Module `delegatecall` Abuse
+
+Executor modules that perform `delegatecall` on behalf of the account can call any function
+in the account's own code or storage. A malicious executor can upgrade the account, drain
+funds, or change ownership.
+
+```solidity
+// VULNERABLE: executor module with unrestricted delegatecall target
+contract ExecutorModule {
+    function execute(address account, address target, bytes calldata data) external {
+        // Attacker can set target = account itself, calling privileged internal functions
+        // Or target = upgrade contract to replace account implementation
+        IAccount(account).execute(target, 0, data);  // No target allowlist
+    }
+}
+
+// SECURE: executor modules must have an allowlist of permitted call targets
+contract SecureExecutorModule {
+    mapping(address => bool) public allowedTargets;
+
+    function execute(address account, address target, bytes calldata data) external {
+        require(allowedTargets[target], "Target not allowed");
+        require(target != account, "Cannot call self");
+        IAccount(account).execute(target, 0, data);
+    }
+}
+```
+
+### ERC-7484 Module Registry
+
+The ERC-7484 Module Registry provides on-chain attestation for smart account modules.
+Accounts should verify module attestations before installation to reduce risk.
+
+```solidity
+// Using ERC-7484 registry to verify module before installation
+interface IERC7484Registry {
+    function checkForAccount(
+        address smartAccount,
+        address module,
+        uint256 moduleType
+    ) external view;  // Reverts if attestation is invalid
+}
+
+contract SecureAccount {
+    IERC7484Registry immutable registry;
+
+    function installModule(uint256 moduleType, address module, bytes calldata initData)
+        external onlyEntryPointOrSelf
+    {
+        // Verify attestation before installing
+        registry.checkForAccount(address(this), module, moduleType);
+        _modules[moduleType].add(module);
+        IModule(module).onInstall(initData);
+    }
+}
+```
+
+**ERC-7484 Checklist:**
+- [ ] Does the account integrate with ERC-7484 registry for module attestation?
+- [ ] Are module types (validator=1, executor=2, fallback=3, hook=4) properly segregated?
+- [ ] Can users configure trusted attesters for the registry?
+
+---
+
+## ERC-7821 — Minimal Batch Executor (EIP-7702 Delegation)
+
+ERC-7821 defines a minimal `execute(bytes32 mode, bytes calldata executionData)` interface
+for batch execution, designed to work as an EIP-7702 delegation target. The key security
+requirement is **full EIP-712 replay protection** — without it, signed batch transactions
+can be replayed across chains or after nonce reuse.
+
+```solidity
+interface IERC7821 {
+    function execute(bytes32 mode, bytes calldata executionData) external payable;
+    function supportsExecutionMode(bytes32 mode) external view returns (bool);
+}
+
+// VULNERABLE: no replay protection on execute calls
+contract MinimalExecutor is IERC7821 {
+    function execute(bytes32 mode, bytes calldata executionData) external payable {
+        // Any caller can execute arbitrary calls — no signature check, no nonce
+        Call[] memory calls = abi.decode(executionData, (Call[]));
+        for (uint256 i; i < calls.length; i++) {
+            (bool success,) = calls[i].target.call{value: calls[i].value}(calls[i].data);
+            if (!success) revert CallFailed(i);
+        }
+    }
+}
+
+// SECURE: EIP-712 signed batch with full replay protection
+contract SecureERC7821 is IERC7821 {
+    bytes32 private immutable DOMAIN_SEPARATOR;
+    mapping(bytes32 => uint256) public nonces;  // Per-key nonce mapping
+
+    bytes32 constant BATCH_TYPEHASH = keccak256(
+        "Batch(Call[] calls,bytes32 nonce,uint256 deadline)"
+        "Call(address target,uint256 value,bytes data)"
+    );
+
+    function execute(bytes32 mode, bytes calldata executionData) external payable {
+        (Call[] memory calls, bytes32 nonce, uint256 deadline, bytes memory sig) =
+            abi.decode(executionData, (Call[], bytes32, uint256, bytes));
+
+        require(block.timestamp <= deadline, "Expired");
+        require(nonces[nonce] == 0, "Nonce used");
+        nonces[nonce] = 1;  // Replay protection
+
+        bytes32 hash = _hashBatch(calls, nonce, deadline);
+        address signer = ECDSA.recover(hash, sig);
+        require(signer == address(this) || _isAuthorized(signer), "Unauthorized");
+
+        for (uint256 i; i < calls.length; i++) {
+            (bool success,) = calls[i].target.call{value: calls[i].value}(calls[i].data);
+            if (!success) revert CallFailed(i);
+        }
+    }
+}
+```
+
+**Security Checklist for ERC-7821 Implementations:**
+- [ ] All `execute()` calls require valid signature from the account owner/delegate
+- [ ] EIP-712 structured hash includes: chain ID (in domain separator), nonce, deadline
+- [ ] Nonces are per-key (not global) to support key rotation without invalidating other keys
+- [ ] `deadline` prevents long-lived signature validity
+- [ ] Cross-chain replay: domain separator includes `block.chainid` (not hardcoded at deploy)
+- [ ] Batch mode codes are validated — unknown modes should revert, not silently no-op
+- [ ] `supportsExecutionMode()` returns accurate mode support (no false positives)
+- [ ] EIP-7702 delegation target: verify the delegated-to contract's `execute()` is safe before signing
+
+---
+
+## Entry Point Interaction
+
+```solidity
+// Entry Point address (same on all EVM chains)
+address constant ENTRY_POINT_V06 = 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789;
+address constant ENTRY_POINT_V07 = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
+
+// Depositing to Entry Point for gas
+interface IEntryPoint {
+    function depositTo(address account) external payable;
+    function withdrawTo(address payable dest, uint256 amount) external;
+    function getDepositInfo(address account) external view returns (DepositInfo memory);
+}
+
+// Account must have deposit or paymaster
+function ensureFunded() external payable {
+    IEntryPoint(entryPoint).depositTo{value: msg.value}(address(this));
+}
+```
+
+---
+
+## Testing Account Abstraction
+
+```solidity
+// Foundry test for AA
+contract AccountTest is Test {
+    IEntryPoint entryPoint;
+    Account account;
+    address owner;
+    uint256 ownerKey;
+
+    function setUp() public {
+        // Fork mainnet for real Entry Point
+        vm.createSelectFork(vm.envString("ETH_RPC_URL"));
+        entryPoint = IEntryPoint(0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789);
+
+        (owner, ownerKey) = makeAddrAndKey("owner");
+        account = new Account(owner, address(entryPoint));
+
+        // Fund account
+        vm.deal(address(account), 1 ether);
+        entryPoint.depositTo{value: 0.5 ether}(address(account));
+    }
+
+    function test_ValidateUserOp() public {
+        UserOperation memory userOp = _createUserOp();
+        bytes32 userOpHash = entryPoint.getUserOpHash(userOp);
+
+        // Sign
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            ownerKey,
+            userOpHash.toEthSignedMessageHash()
+        );
+        userOp.signature = abi.encodePacked(r, s, v);
+
+        // Validate
+        vm.prank(address(entryPoint));
+        uint256 result = account.validateUserOp(userOp, userOpHash, 0);
+        assertEq(result, 0); // Valid
+    }
+
+    function test_RejectInvalidSignature() public {
+        UserOperation memory userOp = _createUserOp();
+        bytes32 userOpHash = entryPoint.getUserOpHash(userOp);
+
+        // Sign with wrong key
+        (, uint256 wrongKey) = makeAddrAndKey("attacker");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            wrongKey,
+            userOpHash.toEthSignedMessageHash()
+        );
+        userOp.signature = abi.encodePacked(r, s, v);
+
+        vm.prank(address(entryPoint));
+        uint256 result = account.validateUserOp(userOp, userOpHash, 0);
+        assertEq(result, 1); // SIG_VALIDATION_FAILED
+    }
+}
+```

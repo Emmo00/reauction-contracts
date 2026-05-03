@@ -1,0 +1,1806 @@
+# Security Tool Integration Guide
+
+How to leverage industry-standard smart contract security tools during audits.
+Each tool serves a different purpose — use them in combination for maximum coverage.
+
+---
+
+## Tool Overview
+
+| Tool | Type | Developer | Best For |
+|------|------|-----------|----------|
+| **Slither** | Static analyzer | Trail of Bits | Fast vulnerability detection, CI integration, SARIF output |
+| **Aderyn** | Static analyzer | Cyfrin | Solidity-specific patterns, Foundry integration |
+| **Slang** | AST analyzer | Nomic Foundation | Deep syntax-level analysis, custom queries, node traversal |
+| **Echidna** | Property-based fuzzer | Trail of Bits | Invariant testing, complex state exploration |
+| **Medusa** | Parallel fuzzer | Trail of Bits | Faster fuzzing via go-ethereum, multi-threaded |
+| **Foundry (Forge)** | Testing/fuzzing/coverage | Paradigm | Unit tests, fuzz tests, gas reports, fork testing, coverage |
+| **Halmos** | Symbolic testing | a16z | Formal verification of Solidity properties |
+| **Certora Prover** | Formal verification | Certora | Mathematical proof of correctness |
+| **Mythril** | Symbolic execution | Consensys | ⚠ DEPRECATED — unmaintained since 2023; use Halmos or Foundry fuzz instead |
+| **Manticore** | Symbolic execution | Trail of Bits | ⚠ DEPRECATED — officially paused 2023; use Medusa or Foundry fuzz instead |
+| **Wake** | Static analyzer + fuzzer | Ackee Blockchain | Python-based, deep data flow, Foundry-style tests |
+| **Semgrep** | Pattern matching | Semgrep Inc. | Fast regex+AST rules, CI integration, custom rules |
+| **4naly3er** | Report generator | Community | Code4rena-style automated finding lists |
+
+---
+
+## 1. Slither (Static Analysis)
+
+**What it detects**: 90+ vulnerability patterns including reentrancy, uninitialized
+variables, shadowing, unchecked calls, access control issues, and more.
+
+### Usage
+
+```bash
+# Basic run
+slither .
+
+# JSON output for programmatic processing
+slither . --json slither-report.json
+
+# Run specific detectors only
+slither . --detect reentrancy-eth,reentrancy-no-eth,uninitialized-state
+
+# Print contract information
+slither . --print human-summary
+slither . --print contract-summary
+slither . --print function-summary
+
+# Check for upgrade safety
+slither . --print upgradeability-check
+```
+
+### Key Detectors by Severity
+
+**High:**
+- `reentrancy-eth` — Reentrancy with ETH transfer
+- `suicidal` — Functions allowing anyone to selfdestruct
+- `uninitialized-state` — State variables not initialized
+- `arbitrary-send-eth` — Functions sending ETH to arbitrary addresses
+
+**Medium:**
+- `reentrancy-no-eth` — Reentrancy without ETH (state manipulation)
+- `locked-ether` — Contracts that receive but cannot send ETH
+- `controlled-delegatecall` — Delegatecall with user-controlled target
+- `tx-origin` — Using tx.origin for authentication
+
+**Low / Informational:**
+- `pragma` — Floating pragma
+- `solc-version` — Old Solidity version
+- `naming-convention` — Non-standard naming
+- `unused-state` — Unused state variables
+
+### CI Integration
+
+```yaml
+# GitHub Actions example
+- name: Run Slither
+  uses: crytic/slither-action@v0.4.0
+  with:
+    target: '.'
+    slither-args: '--json slither-report.json'
+```
+
+### SARIF Output (for CI/CD integration)
+
+SARIF (Static Analysis Results Interchange Format) is the industry standard for
+integrating security tool output into GitHub, GitLab, and other CI systems.
+
+```bash
+# Generate SARIF output
+slither . --sarif slither.sarif
+
+# GitHub Actions: upload SARIF to Security tab
+- name: Upload Slither SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: slither.sarif
+    category: slither
+```
+
+```yaml
+# Full CI workflow with SARIF upload
+name: Slither Analysis
+on: [push, pull_request]
+jobs:
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        with:
+          target: '.'
+          slither-args: '--sarif slither.sarif --json slither.json'
+          fail-on: high
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: slither.sarif
+```
+
+### Limitations
+
+Slither is fast but may produce false positives. Always manually verify findings.
+It cannot detect business logic errors or economic attack vectors.
+
+---
+
+### Slither Triage Cheat Sheet — What to Do With 200 Findings
+
+A production Slither run typically generates 100–300 findings. The distribution is roughly:
+**~60% false positives or zero-value informational**, ~30% real Medium/Low, ~10% genuine High.
+Knowing which detectors to investigate first — and when to skip — is more valuable than
+knowing all detector names.
+
+#### Step 1 — Filter Before Reading
+
+```bash
+# Exclude test files, mocks, and dependencies (most false positives live here)
+slither . --filter-paths "test/,mock/,lib/,node_modules/,script/"
+
+# Focus on High and Medium only (use for time-constrained audits / contests)
+slither . --exclude-informational --exclude-low \
+          --filter-paths "test/,mock/,lib/"
+
+# Run against a single contract to focus on the most critical logic
+slither contracts/Core.sol
+
+# JSON output for grep/jq processing
+slither . --json slither.json --filter-paths "test/,lib/"
+
+# Extract only High-impact findings from JSON
+cat slither.json | jq '.results.detectors[] | select(.impact == "High") | {check: .check, description: .description}'
+```
+
+#### Step 2 — Priority Order
+
+Work findings in this order, stopping when time runs out:
+
+| Priority | Detectors | Action |
+|----------|-----------|--------|
+| **P0 — Investigate immediately** | `reentrancy-eth`, `suicidal`, `arbitrary-send-eth`, `controlled-delegatecall`, `msg-value-loop`, `unprotected-upgrade` | Read the code. These are almost always real. |
+| **P1 — Investigate after P0** | `reentrancy-no-eth`, `unchecked-transfer`, `uninitialized-state`, `tautology`, `write-after-write`, `tx-origin` | High signal. Check for FP conditions (see below). |
+| **P2 — Context required** | `divide-before-multiply`, `incorrect-equality`, `locked-ether`, `shadowing-state`, `reentrancy-benign` | Often real, but many legitimate patterns trigger these. Read the surrounding code. |
+| **P3 — Skip unless full audit** | `naming-convention`, `solc-version`, `pragma`, `dead-code`, `unused-state`, `low-level-calls` (used correctly), `too-many-digits` | Noise in most codebases. Do last or not at all in a contest. |
+
+#### Step 3 — False Positive Identification Guide
+
+For each detector, know when to immediately close it as a FP:
+
+**`reentrancy-eth` / `reentrancy-no-eth`**
+- FP if the function has `nonReentrant` modifier from a battle-tested source (OZ, Solmate)
+- FP if the external call is to a trusted contract with known behavior (e.g., Chainlink `latestRoundData`)
+- FP if state updates happen *before* the external call (strict CEI)
+- Real if: no reentrancy guard, effects after interactions, untrusted callee
+
+**`unchecked-transfer`**
+- FP if using `SafeERC20.safeTransfer()` / `SafeERC20.safeTransferFrom()` (OZ SafeERC20)
+- FP if transfer target is `address(this)` (cannot fail meaningfully)
+- FP if the token is a known non-reverting token and the return value is genuinely irrelevant
+- Real if: raw `token.transfer()` or `token.transferFrom()` return value is ignored on external token
+
+**`divide-before-multiply`**
+- FP if the division is intentional integer truncation (e.g., `block.timestamp / PERIOD`)
+- FP if both operations are on different variables (Slither sometimes overreports cross-variable)
+- FP in Uniswap/Curve math where specific rounding direction is intentional
+- Real if: precision loss affects fee calculation, share pricing, or liquidation thresholds
+
+**`tx-origin`**
+- FP if it's an informational check ("is the original sender an EOA?") not used for auth
+- FP in some meta-transaction forwarder patterns where the check is intentional
+- Real if: `require(tx.origin == owner)` or `require(tx.origin == msg.sender)` as auth guard
+- Note post-Pectra (ERC-7702): `tx.origin == msg.sender` is no longer a reliable EOA check
+
+**`controlled-delegatecall`**
+- FP if the target is validated against a whitelist before the call
+- FP in Diamond proxy patterns where `facetAddress(selector)` is the source
+- Real if: `delegatecall(target, data)` where `target` comes from user input
+
+**`locked-ether`**
+- FP if the contract intentionally holds ETH and withdrawals go through a claim pattern
+- FP if there's a `receive()` function that accumulates fees
+- Real if: contract can receive ETH but has no code path to send it out
+
+**`shadowing-state`**
+- FP if it's in a test file or an intentional override pattern
+- Real if: a local variable shadows a state variable in a way that masks a read
+
+**`msg-value-loop`**
+- Almost always real — `msg.value` inside a loop means only the first iteration gets the value
+- FP only if the loop is unreachable or intentionally short-circuits at iteration 1
+
+**`unprotected-upgrade`**
+- FP if `onlyOwner` / `onlyAdmin` check is inherited but Slither can't trace through inheritance
+- Real if: `upgradeTo()` is callable by anyone, or the `_authorizeUpgrade()` override is empty
+
+#### Step 4 — Grouping and Deduplication
+
+Slither often reports the same underlying issue multiple times across call paths.
+
+```bash
+# Group by detector name to see volume per detector type
+cat slither.json | jq '[.results.detectors[] | .check] | group_by(.) | map({detector: .[0], count: length}) | sort_by(-.count)'
+
+# List all unique contracts/functions affected by reentrancy-eth
+cat slither.json | jq '.results.detectors[] | select(.check == "reentrancy-eth") | .elements[].name' | sort -u
+
+# Find detectors that fired on the same function (high-confidence signals)
+cat slither.json | jq '.results.detectors[] | .elements[] | select(.type == "function") | .name' | sort | uniq -d
+```
+
+When two or more different detectors fire on the same function, that function deserves
+immediate manual review — it has multiple distinct issues or the issues compound.
+
+#### Step 5 — Suppression and Documentation
+
+Once you've confirmed a finding is a false positive, suppress it with inline comments
+so future runs are clean. Document *why* it's a FP.
+
+```solidity
+// Good suppression pattern — explains the FP:
+// slither-disable-next-line reentrancy-eth
+// SafeERC20 used throughout; CEI enforced above; this call is to a trusted feed
+(bool ok, bytes memory data) = chainlinkFeed.call(abi.encodeWithSelector(PRICE_SIG));
+
+// For a full function:
+// slither-disable-start unchecked-transfer
+function _transferFees() internal {
+    // Using SafeERC20 — return value check is internal to safeTransfer
+    token.safeTransfer(feeRecipient, fees);
+}
+// slither-disable-end unchecked-transfer
+
+// For a whole file (put near top, use sparingly):
+// slither-disable-file naming-convention
+```
+
+#### Step 6 — Config File for Persistent Suppression
+
+Create `.slither.config.json` at repo root to suppress noisy categories project-wide:
+
+```json
+{
+  "filter_paths": "test,mock,lib,node_modules,script",
+  "exclude_informational": false,
+  "exclude_low": false,
+  "detectors_to_exclude": "naming-convention,solc-version,pragma,too-many-digits",
+  "fail_on": "high",
+  "json": "slither-report.json",
+  "sarif": "slither.sarif"
+}
+```
+
+> **Note:** Never exclude `reentrancy-eth`, `arbitrary-send-eth`, or `suicidal` from config.
+> Only exclude detectors you've confirmed are universally FP in your codebase.
+
+#### Step 7 — Upgrade and Upgradeability-Specific Run
+
+Run `slither-check-upgradeability` separately from the main pass — it requires different arguments
+and outputs storage layout diffs between proxy and implementation:
+
+```bash
+# Check current implementation
+slither-check-upgradeability contracts/Proxy.sol ProxyName \
+  contracts/Implementation.sol ImplementationV1
+
+# Check upgrade from V1 to V2 (catches storage layout breaks)
+slither-check-upgradeability contracts/Proxy.sol ProxyName \
+  contracts/ImplementationV2.sol ImplementationV2 \
+  --proxy-filename contracts/Proxy.sol \
+  --proxy-name ProxyName
+
+# Key findings to never ignore from upgradeability check:
+# - "Order of variables cannot be modified" → storage layout break (CRITICAL)
+# - "New variables should be placed after old ones" → layout break
+# - "Missing initializer" → uninitialized proxy
+# - "Initializer is not called" → proxy left in uninitialized state
+```
+
+#### Quick Reference — Triage Decision Card
+
+```
+SLITHER FINDING
+      │
+      ├─ From test/ mock/ lib/? → SKIP
+      │
+      ├─ Impact: HIGH
+      │    ├─ reentrancy-eth: nonReentrant present + CEI? → FP; else INVESTIGATE
+      │    ├─ arbitrary-send-eth: user-controlled target? → REAL
+      │    ├─ suicidal: → almost always REAL
+      │    ├─ controlled-delegatecall: target validated? → FP; else REAL
+      │    └─ msg-value-loop: → almost always REAL
+      │
+      ├─ Impact: MEDIUM
+      │    ├─ unchecked-transfer: SafeERC20? → FP; raw transfer? → REAL
+      │    ├─ tx-origin: used as auth guard? → REAL; informational? → FP
+      │    ├─ divide-before-multiply: affects pricing/fees? → INVESTIGATE
+      │    └─ reentrancy-no-eth: CEI + guard? → FP; else → INVESTIGATE
+      │
+      └─ Impact: LOW / INFO
+           ├─ naming-convention, pragma, solc-version → SKIP (unless full audit)
+           ├─ locked-ether: no withdraw path? → INVESTIGATE
+           └─ shadowing-state: test file? → SKIP; production? → CHECK
+```
+
+---
+
+## 2. Aderyn
+
+**Aderyn** is a Rust-based static analyzer by Cyfrin, purpose-built for Solidity security.
+As of v0.6 (2025), it ships 100+ detectors and features an LSP server for IDE integration.
+
+### Installation
+
+```bash
+# Latest version via Cargo
+cargo install aderyn
+
+# Or via Cyfrin's installer
+curl -L https://install.aderyn.dev | bash
+```
+
+### Basic Usage
+
+```bash
+# Analyze entire project
+aderyn .
+
+# Output formats
+aderyn . --output report.md          # Markdown (default)
+aderyn . --output report.json        # JSON for CI/CD
+aderyn . --output report.sarif       # SARIF for GitHub Code Scanning
+
+# Exit code based on severity (useful in CI)
+aderyn . --exit-code-severity high   # Exit 1 if any High+ findings
+aderyn . --exit-code-severity medium # Exit 1 if any Medium+ findings
+
+# Scope control
+aderyn . --src src/                  # Only analyze src/
+aderyn . --exclude test/,mock/       # Skip test and mock files
+```
+
+### Key Detectors (v0.6, 100+ total)
+
+| Category | Detectors |
+|----------|-----------|
+| Reentrancy | ETH reentrancy, ERC20 reentrancy, cross-function reentrancy |
+| Access Control | Missing modifiers, unprotected initializers, public state-changing functions |
+| Arithmetic | Unchecked arithmetic, division before multiplication, truncation |
+| ERC Standards | ERC20/ERC721 compliance, unsafe transfers, missing return values |
+| Proxy/Upgrade | Storage collisions, uninitialized proxy, UUPS authorization |
+| Gas | Inefficient loops, redundant storage reads, state variables in loops |
+
+### v0.6 New Features (2025)
+
+```bash
+# LSP server mode — real-time analysis in VS Code / Neovim
+aderyn lsp
+
+# VS Code extension: search "Aderyn" in marketplace
+# Provides inline squiggles on vulnerable lines as you type
+```
+
+### CI/CD Integration
+
+```yaml
+# .github/workflows/audit.yml
+- name: Run Aderyn
+  run: aderyn . --exit-code-severity high --output aderyn-report.sarif
+
+- name: Upload SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: aderyn-report.sarif
+```
+
+### Decision Guide
+
+Use Aderyn when:
+- You want a security-focused Solidity analyzer (vs Slither's general purpose)
+- CI/CD pipeline needs clean severity-gated exit codes
+- Team uses VS Code and wants inline vulnerability feedback
+- You need SARIF output for GitHub Code Scanning integration
+
+---
+
+## 3. Foundry (Forge) — Testing & Fuzzing
+
+**Purpose**: Development framework with built-in testing and fuzzing.
+Essential for every audit.
+
+### Unit Testing
+
+```bash
+# Run all tests
+forge test
+
+# Verbose output (show traces for failures)
+forge test -vvvv
+
+# Run specific test
+forge test --match-test testWithdraw
+
+# Gas report
+forge test --gas-report
+
+# Fork mainnet for integration testing
+forge test --fork-url $ETH_RPC_URL
+```
+
+### Fuzz Testing
+
+Forge automatically fuzzes any test function with parameters:
+
+```solidity
+function testFuzz_Withdraw(uint256 amount) public {
+    amount = bound(amount, 1, 100 ether);
+    vault.deposit{value: amount}();
+    vault.withdraw(amount);
+    assertEq(address(vault).balance, 0);
+}
+```
+
+```bash
+# Run with more fuzz iterations — configure in foundry.toml (no CLI flag exists):
+# [fuzz]
+# runs = 10000
+#
+# Or via env var: FOUNDRY_FUZZ_RUNS=10000 forge test
+FOUNDRY_FUZZ_RUNS=10000 forge test
+```
+
+### Invariant Testing
+
+Define system invariants that must hold across random sequences of calls:
+
+```solidity
+function invariant_totalSupplyMatchesBalances() public {
+    uint256 sum = 0;
+    for (uint i = 0; i < actors.length; i++) {
+        sum += token.balanceOf(actors[i]);
+    }
+    assertEq(token.totalSupply(), sum);
+}
+```
+
+```bash
+# Run invariant tests
+forge test --match-test invariant
+```
+
+### Invariant Testing with Handlers
+
+Handlers provide controlled randomness for more effective invariant testing:
+
+```solidity
+contract VaultInvariantTest is Test {
+    Vault vault;
+    VaultHandler handler;
+
+    function setUp() public {
+        vault = new Vault();
+        handler = new VaultHandler(vault);
+        targetContract(address(handler));
+    }
+
+    function invariant_SharesEqualBalance() public view {
+        assertEq(vault.totalSupply(), address(vault).balance);
+    }
+}
+
+contract VaultHandler is Test {
+    Vault vault;
+    address[] public actors;
+
+    constructor(Vault vault_) {
+        vault = vault_;
+        actors.push(makeAddr("actor1"));
+        actors.push(makeAddr("actor2"));
+    }
+
+    function deposit(uint256 actorSeed, uint256 amount) public {
+        address actor = actors[actorSeed % actors.length];
+        amount = bound(amount, 0, 10 ether);
+        vm.deal(actor, amount);
+        vm.prank(actor);
+        vault.deposit{value: amount}();
+    }
+
+    function withdraw(uint256 actorSeed, uint256 amount) public {
+        address actor = actors[actorSeed % actors.length];
+        uint256 balance = vault.balanceOf(actor);
+        amount = bound(amount, 0, balance);
+        vm.prank(actor);
+        vault.withdraw(amount);
+    }
+}
+```
+
+### Fork Testing
+
+Test against real mainnet state for integration scenarios:
+
+```solidity
+contract ForkTest is Test {
+    uint256 mainnetFork;
+    IERC20 constant USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
+    IUniswapV3Pool constant POOL = IUniswapV3Pool(0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8);
+
+    function setUp() public {
+        mainnetFork = vm.createFork(vm.envString("ETH_RPC_URL"));
+    }
+
+    function test_ForkMainnet() public {
+        vm.selectFork(mainnetFork);
+        vm.rollFork(18_000_000); // Specific block for reproducibility
+
+        // Test against real Uniswap pool state
+        (uint160 sqrtPriceX96,,,,,,) = POOL.slot0();
+        assertGt(sqrtPriceX96, 0);
+    }
+
+    function test_SimulateSwap() public {
+        vm.selectFork(mainnetFork);
+
+        address whale = 0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503;
+        vm.prank(whale);
+
+        // Simulate real swap behavior
+        uint256 balanceBefore = USDC.balanceOf(whale);
+        // ... perform swap
+        uint256 balanceAfter = USDC.balanceOf(whale);
+
+        assertLt(balanceAfter, balanceBefore);
+    }
+}
+```
+
+```bash
+# Run fork tests
+forge test --fork-url $ETH_RPC_URL -vvv
+
+# Fork at specific block
+forge test --fork-url $ETH_RPC_URL --fork-block-number 18000000
+```
+
+### Coverage Analysis
+
+Coverage is essential for understanding what the existing test suite exercises.
+Gaps in coverage signal areas requiring deeper manual review.
+
+```bash
+# Generate coverage report (summary in terminal)
+forge coverage
+
+# Full LCOV report for HTML visualization
+forge coverage --report lcov
+genhtml lcov.info -o coverage-html
+open coverage-html/index.html
+
+# Summary only (fastest for CI)
+forge coverage --report summary
+
+# Filter to specific contracts
+forge coverage --report summary --match-path "src/core/*"
+```
+
+**Interpreting coverage output:**
+
+| Column | Meaning |
+|--------|---------|
+| `% Lines` | Percentage of executable lines hit |
+| `% Statements` | Percentage of statements executed |
+| `% Branches` | Percentage of conditional branches taken |
+| `% Funcs` | Percentage of functions called |
+
+**Audit usage**: Functions with 0% line coverage have no test verification — manually
+review these. Branches below 80% often indicate untested edge cases (reverts, error paths).
+
+```bash
+# Identify uncovered functions quickly
+forge coverage --report summary 2>&1 | grep "| 0.00%"
+```
+
+### Useful Cheatcodes for Security Testing
+
+```solidity
+// Impersonate addresses
+vm.prank(attacker);
+vm.startPrank(attacker);
+
+// Manipulate time
+vm.warp(block.timestamp + 1 days);
+vm.roll(block.number + 100);
+
+// Deal tokens/ETH
+deal(address(token), attacker, 1000 ether);
+deal(attacker, 100 ether);
+
+// Expect reverts
+vm.expectRevert("Unauthorized");
+contract.adminFunction();
+
+// Snapshot and revert state (Foundry >= 0.2.0)
+uint256 snapshot = vm.snapshotState();
+// ... do stuff ...
+vm.revertToState(snapshot);
+```
+
+---
+
+## 4. Echidna (Property-Based Fuzzing)
+
+**What it does**: Generates random sequences of transactions to try to
+violate user-defined properties. More powerful than Forge fuzzing for
+complex state-dependent bugs.
+
+### Writing Properties
+
+```solidity
+contract EchidnaTest is MyContract {
+    // Properties must start with echidna_
+    function echidna_balance_positive() public view returns (bool) {
+        return address(this).balance >= 0;
+    }
+
+    function echidna_no_unauthorized_mint() public view returns (bool) {
+        return totalSupply() <= MAX_SUPPLY;
+    }
+}
+```
+
+### Running
+
+```bash
+# Basic run
+echidna . --contract EchidnaTest
+
+# With config file
+echidna . --contract EchidnaTest --config echidna-config.yaml
+
+# Assertion mode (checks for assert failures)
+echidna . --contract EchidnaTest --test-mode assertion
+```
+
+### Config Example
+
+```yaml
+testLimit: 50000
+seqLen: 100
+deployer: "0x10000"
+sender: ["0x20000", "0x30000"]
+corpusDir: "echidna-corpus"
+```
+
+### When to Use
+
+- Complex multi-step attack sequences
+- Protocol invariants that span multiple functions
+- Finding edge cases in mathematical operations
+- Testing across many random inputs and call sequences
+
+### Echidna 2025 — Verification Mode and New Features
+
+**Echidna 2.2.x (2025)** introduced several major improvements:
+
+**Verification Mode (Symbolic Echidna)**:
+```bash
+# Run Echidna in symbolic/verification mode
+echidna . --contract MyContract --test-mode assertion --solver bitwuzla
+
+# Multi-solver support (Bitwuzla, cvc5, Z3)
+echidna . --test-mode property --solver cvc5 --solver-timeout 30
+```
+
+**Foundry Test Reproducer Auto-Generation**:
+When Echidna finds a counterexample, it auto-generates a Foundry test that reproduces it:
+```bash
+# After Echidna finds a bug, it outputs a Foundry-compatible PoC:
+# test/EchidnaReproducer.t.sol is auto-generated
+forge test --match-test testEchidnaReproducer -vvvv
+```
+
+**Docker Bundle**:
+```bash
+# Official Docker image with all solvers included
+docker run -v .:/code ghcr.io/crytic/echidna:latest \
+  echidna /code --contract MyContract --test-mode property
+```
+
+**HTML Coverage Reports**:
+```bash
+echidna . --contract MyContract --corpus-dir corpus/ --coverage
+# Open corpus/coverage/index.html in browser
+```
+
+---
+
+## 5. Medusa (Parallel Fuzzing)
+
+**What it does**: Similar to Echidna but runs in parallel using go-ethereum.
+Significantly faster for large codebases.
+
+### Usage
+
+```bash
+# Initialize config
+medusa init
+
+# Run fuzzing
+medusa fuzz
+
+# With specific config
+medusa fuzz --config medusa.json
+```
+
+### Key Advantage
+
+Parallel execution across multiple workers/threads. Better for CI
+environments and large-scale fuzzing campaigns.
+
+---
+
+## 6. Halmos (Symbolic Testing)
+
+**What it does**: Formal verification using symbolic execution.
+Proves properties hold for ALL possible inputs, not just random ones.
+
+### Usage
+
+```bash
+# Run symbolic tests (functions starting with check_)
+halmos --contract MyTest
+
+# With specific solver timeout
+halmos --contract MyTest --solver-timeout 600
+```
+
+### Writing Symbolic Tests
+
+```solidity
+function check_withdrawNeverExceedsBalance(uint256 amount) public {
+    uint256 balanceBefore = balanceOf(address(this));
+    vm.assume(amount > 0 && amount <= balanceBefore);
+
+    withdraw(amount);
+
+    // Balance must decrease by exactly the withdrawn amount
+    assert(balanceOf(address(this)) == balanceBefore - amount);
+}
+```
+
+### When to Use
+
+- Mathematical properties that must hold universally
+- Token accounting invariants
+- Access control completeness proofs
+- When fuzzing hasn't found issues but confidence is needed
+
+### Halmos + Recon: Auto-Reproducer Generation (2025)
+
+The **Recon** extension for Halmos automatically generates CryticToFoundry-compatible
+reproducers when Halmos finds a counterexample:
+
+```bash
+# Install Recon
+pip install halmos-recon
+
+# Run Halmos with Recon
+halmos --contract MyContract --solver-timeout 60 --recon
+
+# When counterexample found, Recon generates:
+# test/HalmosReproducer.t.sol — Foundry test that reproduces the bug
+forge test --match-test check_myInvariant_reproducer -vvvv
+```
+
+**Combining Halmos + Echidna workflow**:
+1. Use Halmos for precise symbolic execution on critical functions
+2. Use Echidna for broader fuzzing across the full state space
+3. Both tools now generate Foundry reproducers — unified debugging workflow
+4. Add reproducers to your test suite as regression tests
+
+---
+
+## 7. Certora Prover (Formal Verification)
+
+**What it does**: Uses CVL (Certora Verification Language) to write
+specifications and mathematically prove contract correctness.
+
+### Writing Specifications (CVL)
+
+```cvl
+rule withdrawDoesNotExceedBalance(address user, uint256 amount) {
+    uint256 balBefore = balanceOf(user);
+
+    env e;
+    require e.msg.sender == user;
+    withdraw(e, amount);
+
+    uint256 balAfter = balanceOf(user);
+    assert balAfter <= balBefore;
+}
+
+invariant totalSupplyIsSumOfBalances()
+    totalSupply() == sum(balanceOf(a) for all address a)
+```
+
+### When to Use
+
+- High-value DeFi protocols (Aave, Compound use Certora)
+- Critical mathematical invariants
+- When the cost of a bug exceeds the cost of formal verification
+- Regulatory or compliance requirements
+
+---
+
+## Recommended Audit Tool Pipeline
+
+### Quick Scan (30 minutes)
+1. `slither .` — Get immediate vulnerability flags
+2. `aderyn .` — Complementary static analysis
+3. `forge test --gas-report` — Run existing tests, check coverage
+
+### Standard Audit (1-2 days)
+1. Quick Scan pipeline above
+2. Write targeted fuzz tests for critical functions in Foundry
+3. Write Echidna properties for protocol invariants
+4. Fork mainnet tests for integration scenarios
+5. Manual review guided by tool findings
+
+### Deep Audit (1+ weeks)
+1. Standard Audit pipeline above
+2. Formal verification with Halmos or Certora for critical paths
+3. Economic modeling and game-theoretic analysis
+4. Cross-contract interaction testing
+5. Medusa parallel fuzzing campaigns (50K+ iterations)
+6. Custom Slither detectors for protocol-specific patterns
+
+---
+
+## Tool Installation
+
+```bash
+# Slither
+pip install slither-analyzer
+
+# Foundry
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# Echidna (binary release or Docker)
+docker pull ghcr.io/trailofbits/eth-security-toolbox:nightly
+
+# Aderyn
+cargo install aderyn
+
+# Halmos
+pip install halmos
+
+# Medusa
+# Download from https://github.com/crytic/medusa/releases
+```
+
+### All-in-One Docker Environment
+
+Trail of Bits provides a preconfigured Docker image with Slither, Echidna,
+Medusa, Foundry, and solc-select:
+
+```bash
+docker pull ghcr.io/trailofbits/eth-security-toolbox:nightly
+docker run -it -v "$(pwd)":/src ghcr.io/trailofbits/eth-security-toolbox:nightly
+```
+
+---
+
+## 8. Gas Benchmarking
+
+### Measuring Gas Usage
+
+```solidity
+// test/Gas.t.sol
+contract GasTest is Test {
+    Vault vault;
+
+    function setUp() public {
+        vault = new Vault();
+    }
+
+    function test_GasDeposit() public {
+        uint256 gasBefore = gasleft();
+        vault.deposit{value: 1 ether}();
+        uint256 gasUsed = gasBefore - gasleft();
+        console2.log("Deposit gas:", gasUsed);
+    }
+
+    function test_GasWithdraw() public {
+        vault.deposit{value: 1 ether}();
+
+        uint256 gasBefore = gasleft();
+        vault.withdraw(1 ether);
+        uint256 gasUsed = gasBefore - gasleft();
+        console2.log("Withdraw gas:", gasUsed);
+    }
+}
+```
+
+### Gas Snapshots
+
+```bash
+# Generate gas snapshot
+forge snapshot
+
+# Compare with baseline
+forge snapshot --check
+
+# Diff two snapshots
+forge snapshot --diff .gas-snapshot
+
+# Run specific gas tests
+forge test --match-test test_Gas -vvv --gas-report
+```
+
+### Gas Optimization Report Template
+
+```markdown
+# Gas Optimization Report
+
+## Summary
+
+| Function | Before | After | Savings |
+|----------|--------|-------|---------|
+| deposit() | 50,000 | 35,000 | 30% |
+| withdraw() | 45,000 | 30,000 | 33% |
+| transfer() | 25,000 | 18,000 | 28% |
+
+## Optimizations Applied
+
+### 1. Storage Packing
+- Reduced slots from 5 to 3
+- Estimated savings: 40,000 gas per tx
+
+### 2. Unchecked Math
+- Applied to loop counters and safe operations
+- Estimated savings: 500 gas per iteration
+
+### 3. Calldata vs Memory
+- Changed function parameters to calldata
+- Estimated savings: 200 gas per call
+
+## Deployment Cost
+
+| Contract | Before | After | Savings |
+|----------|--------|-------|---------|
+| Vault | 500,000 | 400,000 | 20% |
+```
+
+---
+
+## 9. Slang — AST-Based Analysis
+
+**What it does**: `@nomicfoundation/slang` provides a production-quality Solidity
+parser and AST (Abstract Syntax Tree) that enables deep, syntax-level analysis without
+requiring compilation. Ideal for custom queries and pattern detection across large codebases.
+
+### Installation
+
+```bash
+npm install @nomicfoundation/slang
+```
+
+### Core Usage Pattern
+
+```typescript
+import { Language } from "@nomicfoundation/slang/language";
+import { NonterminalKind } from "@nomicfoundation/slang/kinds";
+
+// Parse a Solidity file
+const language = new Language("0.8.24");
+const parseOutput = language.parse(
+  NonterminalKind.SourceUnit,
+  sourceCode
+);
+
+const tree = parseOutput.tree;
+// tree is a fully typed CST (Concrete Syntax Tree)
+```
+
+### Finding All External Calls
+
+```typescript
+import { NonterminalKind } from "@nomicfoundation/slang/kinds";
+
+function findExternalCalls(source: string): string[] {
+  const language = new Language("0.8.24");
+  const parseOutput = language.parse(NonterminalKind.SourceUnit, source);
+
+  const externalCalls: string[] = [];
+  const treeCursor = parseOutput.tree.createTreeCursor();
+
+  // Walk all MemberAccessExpression nodes (e.g., foo.bar())
+  while (treeCursor.goToNextNonterminalWithKind(NonterminalKind.MemberAccessExpression)) {
+    const text = treeCursor.node.unparse();
+    if (text.includes(".call") || text.includes(".send") || text.includes(".transfer")) {
+      externalCalls.push(text);
+    }
+    treeCursor.goToParent();
+  }
+
+  return externalCalls;
+}
+```
+
+### Detecting CEI Violations
+
+```typescript
+// Detect state updates AFTER external calls in function bodies
+function detectCEIViolations(functionBody: string): boolean {
+  const language = new Language("0.8.24");
+  const parseOutput = language.parse(NonterminalKind.FunctionBody, functionBody);
+
+  let foundExternalCall = false;
+  let foundStateUpdateAfterCall = false;
+  const treeCursor = parseOutput.tree.createTreeCursor();
+
+  while (treeCursor.goToNext()) {
+    const node = treeCursor.node;
+
+    // Detect external call patterns
+    if (node.kind === NonterminalKind.FunctionCallExpression) {
+      const text = node.unparse();
+      if (text.match(/\.(call|send|transfer)\s*[\({]/)) {
+        foundExternalCall = true;
+      }
+    }
+
+    // Detect storage writes after an external call
+    if (foundExternalCall && node.kind === NonterminalKind.AssignmentExpression) {
+      foundStateUpdateAfterCall = true;
+    }
+  }
+
+  return foundStateUpdateAfterCall;
+}
+```
+
+### Detecting Spot Price Usage
+
+```typescript
+function detectSpotPriceUsage(source: string): Array<{ line: number; text: string }> {
+  const language = new Language("0.8.24");
+  const parseOutput = language.parse(NonterminalKind.SourceUnit, source);
+  const findings: Array<{ line: number; text: string }> = [];
+
+  const spotPricePatterns = [
+    "getReserves",
+    "slot0",
+    "getSqrtRatioAtTick",
+    "getSqrtPriceAtTick",
+    "getSqrtTwapX96",
+  ];
+
+  const treeCursor = parseOutput.tree.createTreeCursor();
+  while (treeCursor.goToNextNonterminalWithKind(NonterminalKind.FunctionCallExpression)) {
+    const text = treeCursor.node.unparse();
+    if (spotPricePatterns.some(p => text.includes(p))) {
+      const range = treeCursor.textRange;
+      findings.push({ line: range.start.line + 1, text });
+    }
+    treeCursor.goToParent();
+  }
+
+  return findings;
+}
+```
+
+### Running Slang Analysis in a Project
+
+```typescript
+// scan-project.ts — scan all .sol files and report spot price usage
+import { readFileSync, readdirSync, statSync } from "fs";
+import { join } from "path";
+
+function scanDirectory(dir: string): void {
+  const entries = readdirSync(dir);
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    if (statSync(fullPath).isDirectory()) {
+      scanDirectory(fullPath);
+    } else if (entry.endsWith(".sol")) {
+      const source = readFileSync(fullPath, "utf-8");
+      const findings = detectSpotPriceUsage(source);
+      for (const f of findings) {
+        console.log(`${fullPath}:${f.line} — ${f.text.slice(0, 80)}`);
+      }
+    }
+  }
+}
+
+scanDirectory("./src");
+```
+
+### When to Use Slang vs Slither
+
+| Task | Use Slang | Use Slither |
+|------|-----------|-------------|
+| Custom syntax pattern search | ✓ | — |
+| Requires no compilation | ✓ | — |
+| Pre-built vulnerability detectors | — | ✓ |
+| Control flow analysis | — | ✓ |
+| Dataflow / taint analysis | — | ✓ |
+| Parse invalid/partial Solidity | ✓ | — |
+| IDE / language server integration | ✓ | — |
+
+---
+
+## 10. Custom Slither Detectors
+
+Create protocol-specific detectors for patterns Slither doesn't catch by default.
+
+### Detector Structure
+
+```python
+# detectors/my_detector.py
+from slither.detectors.abstract_detector import AbstractDetector, DetectorClassification
+from slither.core.declarations import Function
+
+class MyCustomDetector(AbstractDetector):
+    ARGUMENT = "my-detector"  # slither . --detect my-detector
+    HELP = "Description of what this detects"
+    IMPACT = DetectorClassification.HIGH
+    CONFIDENCE = DetectorClassification.HIGH
+
+    WIKI = "https://..."
+    WIKI_TITLE = "My Custom Detector"
+    WIKI_DESCRIPTION = "Detailed description"
+    WIKI_RECOMMENDATION = "How to fix"
+
+    def _detect(self):
+        results = []
+
+        for contract in self.compilation_unit.contracts_derived:
+            for function in contract.functions:
+                if self._is_vulnerable(function):
+                    info = [
+                        function,
+                        " has vulnerability X\n"
+                    ]
+                    results.append(self.generate_result(info))
+
+        return results
+
+    def _is_vulnerable(self, function: Function) -> bool:
+        # Detection logic here
+        return False
+```
+
+### Example: Detect Missing Slippage Protection
+
+```python
+class MissingSlippageProtection(AbstractDetector):
+    ARGUMENT = "missing-slippage"
+    HELP = "Swap functions without minAmountOut parameter"
+    IMPACT = DetectorClassification.MEDIUM
+    CONFIDENCE = DetectorClassification.MEDIUM
+
+    def _detect(self):
+        results = []
+
+        swap_keywords = ["swap", "exchange", "trade"]
+
+        for contract in self.compilation_unit.contracts_derived:
+            for function in contract.functions:
+                name_lower = function.name.lower()
+
+                # Check if it's a swap function
+                if any(kw in name_lower for kw in swap_keywords):
+                    # Check for slippage parameter
+                    param_names = [p.name.lower() for p in function.parameters]
+                    has_slippage = any(
+                        "min" in p or "slippage" in p or "deadline" in p
+                        for p in param_names
+                    )
+
+                    if not has_slippage:
+                        info = [
+                            function,
+                            " lacks slippage protection\n"
+                        ]
+                        results.append(self.generate_result(info))
+
+        return results
+```
+
+### Example: Detect Spot Price Usage
+
+```python
+class SpotPriceUsage(AbstractDetector):
+    ARGUMENT = "spot-price"
+    HELP = "Detects usage of getReserves for pricing"
+    IMPACT = DetectorClassification.HIGH
+    CONFIDENCE = DetectorClassification.MEDIUM
+
+    def _detect(self):
+        results = []
+
+        for contract in self.compilation_unit.contracts_derived:
+            for function in contract.functions:
+                for node in function.nodes:
+                    for ir in node.irs:
+                        # Check for getReserves call
+                        if hasattr(ir, 'function') and ir.function:
+                            if ir.function.name == "getReserves":
+                                info = [
+                                    function,
+                                    " uses getReserves() - potential price manipulation\n"
+                                ]
+                                results.append(self.generate_result(info))
+
+        return results
+```
+
+### Running Custom Detectors
+
+```bash
+# Install detector
+pip install -e ./my-detectors/
+
+# Run with custom detector
+slither . --detect my-detector,spot-price,missing-slippage
+
+# Run all detectors (default — omit --detect to run everything)
+slither .
+
+# Output as SARIF (for CI integration)
+slither . --detect my-detector --sarif custom-findings.sarif
+```
+
+### Useful Detector Patterns
+
+| Pattern | What to Detect |
+|---------|---------------|
+| External calls in loops | DoS via gas |
+| State read after external call | Read-only reentrancy |
+| Missing events on state change | Poor monitoring |
+| Hardcoded addresses | Deployment issues |
+| Block.timestamp in comparisons | Timing manipulation |
+| tx.origin usage | Phishing vulnerability |
+| delegatecall to variable | Code injection |
+| Unchecked array access | Out of bounds |
+
+---
+
+## 11. Mythril (Symbolic Execution)
+
+> **⚠ DEPRECATED:** Mythril is no longer actively maintained (last meaningful release 2023).
+> Consensys has shifted focus away from it. For symbolic execution use cases, prefer
+> **Halmos** (§6) for property verification or **Foundry fuzz** (§3) for stateful exploration.
+> The section below is retained for reference only.
+
+**What it does**: Performs symbolic execution on EVM bytecode to detect security
+vulnerabilities. Works without source code — analyzes compiled bytecode directly.
+
+### Usage
+
+```bash
+# Analyze a Solidity file
+myth analyze contract.sol
+
+# Analyze deployed contract via RPC
+myth analyze -a 0xContractAddress --rpc mainnet
+
+# Analyze with increased analysis depth
+myth analyze contract.sol --execution-timeout 120
+
+# JSON output for CI integration
+myth analyze contract.sol -o json
+
+# List all detectors
+myth list-detectors
+```
+
+### Key Detectors
+
+- Integer overflow/underflow
+- Reentrancy (ETH theft via external calls)
+- Timestamp dependence
+- Unprotected selfdestruct
+- Delegatecall to user-controlled address
+- Unprotected ether withdrawal
+- Assertion violations
+
+### When to Use
+
+Mythril excels at **bytecode-level analysis** — useful when source is unavailable
+(e.g., auditing deployed contracts without verified source). It can find bugs that
+Slither misses because Slither operates at the source level.
+
+```bash
+# Install
+pip install mythril
+
+# Analyze bytecode directly
+myth analyze --bin-runtime <bytecode_hex>
+```
+
+### Limitations
+
+Mythril is slow on complex contracts (path explosion). Set `--execution-timeout`
+to cap analysis time. Not recommended as the primary tool — use after Slither/Aderyn
+to catch missed patterns, or for unverified bytecode analysis.
+
+---
+
+## 12. Manticore (Symbolic Execution + EVM Simulation)
+
+> **⚠ DEPRECATED:** Manticore was officially paused by Trail of Bits in 2023 and the repository
+> is archived. Do not use for new audits. For multi-transaction state exploration, use
+> **Medusa** (§5) or **Foundry stateful fuzz** (§3) instead.
+> The section below is retained for reference only.
+
+**What it does**: Full EVM simulation with symbolic execution. Unlike Mythril,
+Manticore can simulate multi-transaction attack sequences and has a programmatic
+Python API for writing custom analyses.
+
+### Usage
+
+```bash
+# Run default analysis on a Solidity file
+manticore contract.sol
+
+# With Docker (recommended — avoids dependency issues)
+docker run --rm -v "$(pwd)":/workdir trailofbits/manticore:latest \
+  manticore /workdir/contract.sol
+
+# Run with specific contract
+manticore contract.sol --contract MyContract
+
+# Output to directory
+manticore contract.sol --workspace ./manticore-output
+```
+
+### Programmatic API (Python)
+
+```python
+from manticore.ethereum import ManticoreEVM
+
+m = ManticoreEVM()
+
+# Deploy contract
+with open("contract.sol") as f:
+    source = f.read()
+
+owner = m.create_account(balance=10**18)
+contract = m.solidity_create_contract(source, owner=owner, contract_name="Vault")
+
+# Create symbolic user
+user = m.create_account(balance=10**18)
+
+# Symbolic call — Manticore explores all possible inputs
+amount = m.make_symbolic_value()
+with m.transaction(caller=user):
+    contract.withdraw(amount)
+
+# Check for properties
+for state in m.all_states:
+    world = state.platform
+    if world.get_balance(contract.address) < 0:
+        print(f"Found state where balance goes negative: {state}")
+
+m.finalize()
+```
+
+### When to Use
+
+- **Multi-transaction vulnerability analysis**: attacks requiring a sequence of calls
+  (e.g., approve → transferFrom → withdraw) are better modeled in Manticore
+- **Custom property verification**: write Python scripts to check protocol-specific
+  invariants that no off-the-shelf tool covers
+- **Controlled symbolic analysis**: when you need to constrain the analysis to
+  a specific code path or attack vector
+
+### Limitations
+
+Manticore is the slowest tool in the standard toolkit. Expect minutes-to-hours
+on non-trivial contracts. Use it last, after Slither/Echidna/Foundry, targeted
+at the specific functions or paths you want to prove safe.
+
+```bash
+# Install (pip, requires Python 3.8+)
+pip install manticore[native]
+
+# Or via Trail of Bits Docker toolbox (includes all tools)
+docker pull ghcr.io/trailofbits/eth-security-toolbox:nightly
+```
+
+---
+
+## 13. Semgrep (Pattern Matching)
+
+**What it detects**: Fast, composable code patterns using a combination of regex and
+AST-aware matching. Ideal for enforcing coding standards across a large codebase,
+detecting known-bad patterns, and running in CI without heavy tooling setup.
+
+Used actively by CertiK, OpenZeppelin, and independent auditors for first-pass scanning.
+
+### Installation
+
+```bash
+pip install semgrep
+# or
+brew install semgrep
+```
+
+### Usage
+
+```bash
+# Run community Solidity rules
+semgrep --config "p/solidity" .
+
+# Run specific rule file
+semgrep --config rules/reentrancy.yaml src/
+
+# Output as JSON for integration
+semgrep --config "p/solidity" . --json -o semgrep-report.json
+
+# Run in CI (fail on findings with severity >= error)
+semgrep --config "p/solidity" . --error
+```
+
+### Key Community Rule Packs
+
+| Pack | Command | Covers |
+|------|---------|--------|
+| Solidity general | `p/solidity` | Reentrancy, tx.origin, unchecked math, floating pragma |
+| Smart contracts | `p/smart-contracts` | DeFi-specific patterns, oracle misuse |
+| Trail of Bits | `p/trailofbits` | ToB's curated Solidity rules |
+
+### Writing Custom Rules
+
+Semgrep rules are YAML. Example — detecting `latestRoundData` without staleness check:
+
+```yaml
+rules:
+  - id: chainlink-stale-price
+    patterns:
+      - pattern: |
+          ($FEED).latestRoundData()
+      - pattern-not: |
+          require($TIMESTAMP + $PERIOD > block.timestamp, ...)
+      - pattern-not: |
+          if ($TIMESTAMP + $PERIOD <= block.timestamp) { ... }
+    message: "Chainlink latestRoundData() called without staleness check"
+    languages: [solidity]
+    severity: WARNING
+    metadata:
+      references:
+        - references/vulnerability-taxonomy.md §4.2
+```
+
+Example — detecting `slot0` used as price oracle:
+
+```yaml
+rules:
+  - id: uniswap-slot0-price-oracle
+    pattern: |
+      ($POOL).slot0()
+    message: "slot0() used — manipulable spot price. Use TWAP via observe() instead."
+    languages: [solidity]
+    severity: ERROR
+```
+
+### When to Use Semgrep vs Slither
+
+| Need | Use |
+|------|-----|
+| Known-bad patterns in your own coding rules | Semgrep |
+| Deep data-flow / taint analysis | Slither |
+| Enforce team style guide in CI | Semgrep |
+| Detect complex multi-contract reentrancy | Slither |
+| Fast first-pass before full audit | Semgrep |
+| Full vulnerability detection report | Slither + Aderyn |
+
+### Limitations
+
+- No semantic understanding of EVM — cannot detect issues requiring execution context
+- False negatives for patterns that span multiple files without cross-file analysis
+- Rule quality depends on the rule pack; community rules may miss protocol-specific issues
+
+---
+
+## 14. Wake (Static Analysis + Fuzzing)
+
+**Developer**: Ackee Blockchain Security
+**Type**: Python-based static analyzer + property fuzzer
+**Key differentiator**: Deep inter-contract data flow analysis and call graph construction
+that Slither misses; built-in fuzzing engine using Foundry-compatible test syntax
+
+### Installation
+
+```bash
+pip install eth-wake
+
+# Verify
+wake --version
+```
+
+### Core Usage
+
+```bash
+# Run all built-in detectors
+wake detect all
+
+# Run specific detector
+wake detect reentrancy
+wake detect unsafe-delegatecall
+wake detect unchecked-return-value
+wake detect unused-import
+
+# Print call graph (useful for understanding cross-contract flows)
+wake print call-graph
+
+# Print inheritance graph
+wake print inheritance-graph
+
+# Print storage layout
+wake print storage-layout ContractName
+
+# Run fuzz tests (compatible with Foundry test syntax)
+wake test
+
+# Run with coverage
+wake test --coverage
+```
+
+### Key Detectors
+
+| Detector | What it finds |
+|----------|---------------|
+| `reentrancy` | Cross-function and cross-contract reentrancy via data flow |
+| `unsafe-delegatecall` | Delegatecall to user-controlled or non-validated addresses |
+| `unchecked-return-value` | External calls whose return value is ignored |
+| `unused-import` | Unused imports — surface area reduction |
+| `incorrect-interface` | Interface mismatch between contract and expected ABI |
+| `tautology` | Always-true or always-false conditions |
+| `msg-value-nonpayable` | `msg.value` access in non-payable functions |
+
+### Deep Data Flow Analysis
+
+Wake constructs inter-procedural data flow graphs to detect taint propagation.
+This catches patterns that single-function analyzers like Slither miss:
+
+```python
+# Wake Python API — trace all paths from user input to sensitive operation
+from wake.analysis import ...
+
+# Example: find all paths where user-controlled value reaches a transfer call
+# (pseudo-code for Wake's Python scripting API)
+for fn in contract.functions:
+    for param in fn.parameters:
+        if param.is_user_controlled():
+            paths = trace_to_external_calls(param)
+            for path in paths:
+                if path.ends_in_transfer():
+                    report(path, "User-controlled value flows to transfer")
+```
+
+### Writing Fuzz Tests (Wake Syntax)
+
+Wake uses the same `@pytest.mark.parametrize` style but for Solidity invariants:
+
+```python
+# tests/test_invariants.py (Wake fuzzing)
+from wake.testing import *
+
+@chain.connect()
+def test_balance_invariant(chain: Chain):
+    vault = chain.deploy(Vault)
+    user = chain.accounts[1]
+
+    @invariant()
+    def total_assets_ge_shares():
+        # Total assets must always >= total shares value
+        assert vault.totalAssets() >= vault.totalSupply() * vault.pricePerShare() // 10**18
+
+    with may_revert():
+        vault.deposit(10**18, user, from_=user)
+    with may_revert():
+        vault.withdraw(5 * 10**17, user, user, from_=user)
+
+    total_assets_ge_shares()  # Check invariant after each action
+```
+
+### When to Use Wake vs Slither
+
+| Scenario | Use |
+|----------|-----|
+| Fast first-pass scan | Slither (faster) |
+| Deep cross-contract data flow | Wake |
+| Python-scriptable custom analysis | Wake |
+| Invariant fuzzing without writing Solidity | Wake |
+| CI/CD integration with SARIF | Slither or Aderyn |
+| Call graph visualization | Wake `print call-graph` |
+| Storage layout analysis | Wake `print storage-layout` |
+
+### Limitations
+
+- Slower than Slither for large codebases
+- Python ecosystem dependency (pip, venv management)
+- Fuzzing engine less battle-tested than Echidna for complex protocols
+- Some detectors have higher false-positive rate than Slither's high-confidence detectors
+
+---
+
+## 15. Kontrol (Formal Verification via K Framework)
+
+**Source**: Runtime Verification | **Language**: K Framework + Foundry integration
+**Best for**: EVM-precise formal proofs; cases where Certora/Halmos approximations
+are insufficient due to low-level bytecode or storage semantics.
+
+### Overview
+
+Kontrol bridges Foundry tests and KEVM (K Semantics of the EVM) — a byte-level
+complete formal model of the EVM. It lifts cheatcode-aware Foundry property tests
+into K specifications and proves them over the full EVM execution model with no
+approximations. Complements Halmos (fast, bounded) and Certora (spec language, cloud).
+
+```bash
+# Install
+pip install kontrol
+
+# Build K specs from current Foundry project
+kontrol build
+
+# Prove a single test function
+kontrol prove --test MyContract.testInvariant
+
+# Prove all functions matching a pattern
+kontrol prove --test 'test*Invariant*'
+
+# Resume an interrupted proof session
+kontrol prove --test MyContract.testInvariant --reinit
+
+# View proof results
+kontrol show MyContract.testInvariant
+```
+
+### When to Use Kontrol vs Other Formal Tools
+
+| Need | Best Tool |
+|------|-----------|
+| Fast bounded symbolic execution | **Halmos** |
+| High-assurance with dedicated spec language (CVL) | **Certora** |
+| EVM-precise bytecode semantics proofs | **Kontrol** |
+| Low-level opcode/storage slot correctness | **Kontrol** |
+| Reuse existing Foundry tests as formal specs | **Kontrol** |
+| Cross-contract invariants with complex state | **Certora** |
+
+### Writing Kontrol-Compatible Tests
+
+Kontrol works with standard Foundry tests — no new language required. Any test
+using `vm.assume` for preconditions and `assert*` for postconditions can be lifted:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.25;
+
+import {Test} from "forge-std/Test.sol";
+import {MyToken} from "../src/MyToken.sol";
+
+contract MyTokenFormalTest is Test {
+    MyToken token;
+
+    function setUp() public {
+        token = new MyToken(1_000_000e18);
+    }
+
+    // Kontrol proves this for ALL symbolic values of amount and to
+    function testTransferPreservesTotalSupply(uint256 amount, address to) public {
+        vm.assume(to != address(0));
+        vm.assume(to != address(this));
+        vm.assume(amount <= token.balanceOf(address(this)));
+
+        uint256 totalBefore = token.totalSupply();
+        token.transfer(to, amount);
+
+        // Formally proven: transfer never changes totalSupply
+        assertEq(token.totalSupply(), totalBefore);
+    }
+
+    // Prove storage layout is not corrupted by any sequence of calls
+    function testNoStorageCorruption(uint256 slot) public view {
+        vm.assume(slot > 10); // skip known contract slots
+        bytes32 val;
+        assembly { val := sload(slot) }
+        assertEq(val, bytes32(0)); // all unknown slots must remain zero
+    }
+}
+```
+
+### Limitations
+
+- Slower than Halmos for simple properties (K Framework compilation is heavyweight)
+- Proof time can exceed hours for non-trivial control flow
+- Requires understanding of K semantics to debug failed proofs
+- Less tooling support than Certora (no cloud, no dashboard)
+- Best used as final high-assurance step, not primary fuzzing tool
+
+---
+
+## Tool Selection Matrix
+
+Quick reference for choosing the right tool. No single tool covers everything — use them in combination.
+
+| Tool | Static | Fuzz | Symbolic | No-compile | Speed | False+ | Best Use Case |
+|------|:------:|:----:|:--------:|:----------:|-------|--------|---------------|
+| **Slither** | ✓ | | | | Fast | Medium | General-purpose CI scan, 90+ built-in detectors |
+| **Aderyn** | ✓ | | | | Fast | Low | First-pass scan, clean markdown reports |
+| **Wake** | ✓ | ✓ | | | Medium | Low | Data flow analysis, Python scripting, invariants |
+| **Semgrep** | ✓ | | | ✓ | Fast | Low-Med | Custom org-specific patterns, monorepo CI |
+| **4naly3er** | ✓ | | | | Fast | Medium | Competition prep, Code4rena style reports |
+| **Foundry** | | ✓ | | | Medium | Low | Unit/fuzz/invariant tests, fork testing |
+| **Echidna** | | ✓ | | | Medium | Low | Multi-step invariant breaking, corpus reuse |
+| **Medusa** | | ✓ | | | Fast | Low | Parallel fuzzing, large codebases |
+| **Halmos** | | | ✓ | | Slow | Very Low | Prove properties for ALL inputs, no fuzzing luck |
+| **Certora** | | | ✓ | | Slow | Very Low | Mathematical proofs, high-value protocol guarantees |
+| **Kontrol** | | | ✓ | | Slowest | Very Low | EVM-precise formal proofs, bytecode semantics |
+| **Mythril** | | | ✓ | ✓ | Slow | Medium | Bytecode-only analysis, unverified contracts |
+| **Manticore** | | | ✓ | | Slowest | Low | Multi-tx custom analysis, Python scripting |
+| **Slang** | ✓ | | | ✓ | Fast | N/A | Custom AST queries, IDE integration, no-compile |
+
+### Decision Guide
+
+```
+Starting an audit      → Slither + Aderyn (fast, catch low-hanging fruit)
+Invariant testing      → Foundry (quick) → Echidna (thorough) → Medusa (parallel)
+Proving correctness    → Halmos (bounded) → Certora (unbounded, expensive) → Kontrol (EVM-precise)
+EVM bytecode proofs    → Kontrol (K Framework, highest assurance, slowest)
+Custom patterns        → Slither detector (Python) | Semgrep (YAML) | Slang (TypeScript AST)
+Unverified bytecode    → Mythril
+Competition prep       → 4naly3er for automated findings list
+CI/CD pipeline         → Slither + Aderyn + Semgrep (fast, all support SARIF output)
+```
+
+### Wake Quick Start
+
+```bash
+# Install
+pip install eth-wake
+
+# Run all detectors
+wake detect all
+
+# Run specific detector
+wake detect reentrancy
+
+# Print call graph
+wake print call-graph
+
+# Run tests (Foundry-compatible syntax)
+wake test
+```
+
+### Semgrep Quick Start
+
+```bash
+# Install
+pip install semgrep
+
+# Run official Solidity ruleset
+semgrep --config p/solidity .
+
+# Run Trail of Bits ruleset
+semgrep --config p/trailofbits .
+
+# Custom rule example (save as rules/missing-slippage.yaml):
+# rules:
+#   - id: missing-slippage-protection
+#     patterns:
+#       - pattern: $ROUTER.swapExactTokensForTokens($AMOUNT, 0, ...)
+#     message: "Zero minAmountOut — vulnerable to sandwich attack"
+#     severity: WARNING
+#     languages: [solidity]
+semgrep --config rules/ src/
+```
