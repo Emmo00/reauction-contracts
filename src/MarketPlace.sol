@@ -105,14 +105,14 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
     event AuctionDurationExtensionThresholdUpdated(uint256 oldValue, uint256 newValue);
     event AuctionDurationExtensionUpdated(uint256 oldValue, uint256 newValue);
 
-    constructor(address usdc_, uint256 usdcDecimals, address collectibles_, address admin_) {
+    constructor(address usdc_, uint256 usdcDecimals_, address collectibles_, address admin_) {
         require(usdc_ != address(0), "Zero address: USDC");
         require(collectibles_ != address(0), "Zero address: collectibles");
         require(admin_ != address(0), "Zero address: admin");
 
         USDC = IERC20(usdc_);
         COLLECTIBLES = ICollectibleCasts(collectibles_);
-        auctionMinBidAmount = 1 * 10 ** usdcDecimals; // 1 USDC
+        auctionMinBidAmount = 1 * 10 ** usdcDecimals_; // 1 USDC
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
