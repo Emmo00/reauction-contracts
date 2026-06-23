@@ -40,8 +40,7 @@ contract DeployMarketPlace is Script {
 
         DeploymentConfig memory config = getDeploymentConfig();
 
-        MarketPlace marketplace =
-            new MarketPlace(config.usdc, config.usdcDecimals, config.collectible, config.admin);
+        MarketPlace marketplace = new MarketPlace(config.usdc, config.usdcDecimals, config.collectible, config.admin);
 
         console.log("MarketPlace deployed at:", address(marketplace));
 
