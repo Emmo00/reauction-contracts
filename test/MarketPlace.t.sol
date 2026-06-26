@@ -158,7 +158,7 @@ contract MarketPlaceTest is Test {
 
         // bob withdraws
         vm.prank(bob);
-        mp.withdraw();
+        mp.withdraw(bob);
         assertEq(usdc.balanceOf(bob), bobBalBefore + 5e6);
         assertEq(mp.pendingWithdrawals(bob), 0);
 
@@ -167,19 +167,21 @@ contract MarketPlaceTest is Test {
         assertEq(highestBidder, charlie);
     }
 
-    function test_placeBid_sameBidderStacks() public {
+    function test_placeBid_sameBidderReplacesTotalAndOnlyCollectsDelta() public {
         _createAuction();
 
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 5e6);
 
         // second bid must still meet minimum (highestBid + 10% = 5.5 USDC)
+        uint256 bobBalanceBeforeSecondBid = usdc.balanceOf(bob);
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 6e6);
 
         (, uint256 highestBid, address highestBidder,,,) = mp.auctions(1);
-        assertEq(highestBid, 11e6); // 5 + 6 stacked
+        assertEq(highestBid, 6e6); // total bid is replaced, not stacked
         assertEq(highestBidder, bob);
+        assertEq(usdc.balanceOf(bob), bobBalanceBeforeSecondBid - 1e6); // only delta is collected
     }
 
     function test_placeBid_extendsAuctionNearEnd() public {
@@ -283,7 +285,7 @@ contract MarketPlaceTest is Test {
         assertEq(mp.pendingWithdrawals(bob), 10e6);
 
         vm.prank(bob);
-        mp.withdraw();
+        mp.withdraw(bob);
         assertEq(usdc.balanceOf(bob), bobBefore + 10e6);
         assertEq(nft.ownerOf(TOKEN_ID), alice);
     }
@@ -350,7 +352,7 @@ contract MarketPlaceTest is Test {
         // seller proceeds credited via pull-payment (90% after 10% fee)
         assertEq(mp.pendingWithdrawals(alice), 90e6);
         vm.prank(alice);
-        mp.withdraw();
+        mp.withdraw(alice);
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         // protocol fee accrued
         assertEq(mp.feeAccrued(), 10e6);
@@ -455,7 +457,7 @@ contract MarketPlaceTest is Test {
         // seller proceeds credited via pull-payment (90 USDC after 10% fee on 100)
         assertEq(mp.pendingWithdrawals(alice), 90e6);
         vm.prank(alice);
-        mp.withdraw();
+        mp.withdraw(alice);
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         // buyer paid 100 USDC
         assertEq(usdc.balanceOf(bob), bobBefore - LISTING_PRICE);
@@ -673,7 +675,7 @@ contract MarketPlaceTest is Test {
         assertEq(usdc.balanceOf(bob), 1000e6 - 50e6);
         assertEq(mp.pendingWithdrawals(bob), 50e6);
         vm.prank(bob);
-        mp.withdraw();
+        mp.withdraw(bob);
         assertEq(usdc.balanceOf(bob), 1000e6);
 
         // Fast-forward past end
@@ -689,7 +691,7 @@ contract MarketPlaceTest is Test {
         // Alice's proceeds credited (100 - 10% fee); claim them
         assertEq(mp.pendingWithdrawals(alice), 90e6);
         vm.prank(alice);
-        mp.withdraw();
+        mp.withdraw(alice);
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         assertEq(mp.feeAccrued(), 10e6);
 
@@ -715,7 +717,7 @@ contract MarketPlaceTest is Test {
         // seller proceeds credited via pull-payment
         assertEq(mp.pendingWithdrawals(alice), 90e6);
         vm.prank(alice);
-        mp.withdraw();
+        mp.withdraw(alice);
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         assertEq(mp.feeAccrued(), 10e6);
     }
@@ -754,7 +756,19 @@ contract MarketPlaceTest is Test {
     function test_withdraw_revertsNothingToWithdraw() public {
         vm.prank(bob);
         vm.expectRevert("Nothing to withdraw");
-        mp.withdraw();
+        mp.withdraw(bob);
+    }
+
+    function test_withdraw_revertsZeroReceiver() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(TOKEN_ID, 5e6);
+        vm.prank(charlie);
+        mp.placeBid(TOKEN_ID, 10e6);
+
+        vm.prank(bob);
+        vm.expectRevert("Zero address: receiver");
+        mp.withdraw(address(0));
     }
 
     function test_withdraw_emitsEvent() public {
@@ -765,9 +779,9 @@ contract MarketPlaceTest is Test {
         mp.placeBid(TOKEN_ID, 10e6);
 
         vm.expectEmit(true, false, false, true);
-        emit MarketPlace.Withdrawal(bob, 5e6);
+        emit MarketPlace.Withdrawal(bob, bob, 5e6);
         vm.prank(bob);
-        mp.withdraw();
+        mp.withdraw(bob);
     }
 
     // ==================== Fee snapshot (M-3) ====================

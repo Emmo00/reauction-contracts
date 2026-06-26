@@ -368,6 +368,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
 
     /// @notice Withdraw USDC owed to the caller from settled sales, refunds, or cancellations.
     function withdraw(address receiver) external nonReentrant {
+        require(receiver != address(0), "Zero address: receiver");
         uint256 amount = pendingWithdrawals[msg.sender];
         require(amount > 0, "Nothing to withdraw");
 
