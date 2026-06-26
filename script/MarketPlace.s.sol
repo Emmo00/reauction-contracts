@@ -19,19 +19,19 @@ contract DeployMarketPlace is Script {
             config.collectible = vm.envAddress("MAINNET_COLLECTIBLE");
             config.usdc = vm.envAddress("MAINNET_USDC");
             config.admin = vm.envAddress("MAINNET_OWNER");
+            config.usdcDecimals = vm.envUint("MAINNET_USDC_DECIMALS");
         } else {
             config.collectible = vm.envAddress("TESTNET_COLLECTIBLE");
             config.usdc = vm.envAddress("TESTNET_USDC");
             config.admin = vm.envAddress("TESTNET_OWNER");
+            config.usdcDecimals = vm.envUint("TESTNET_USDC_DECIMALS");
         }
-
-        // USDC on Base uses 6 decimals
-        config.usdcDecimals = 6;
 
         console.log("Network:", network);
         console.log("Collectible:", config.collectible);
         console.log("USDC:", config.usdc);
         console.log("Admin:", config.admin);
+        console.log("USDC Decimals:", config.usdcDecimals);
     }
 
     function run() external {
