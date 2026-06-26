@@ -15,4 +15,4 @@ MarketPlace: [0xc56cd6847f0cc13ef4e2ad7614da9d2ff520ae9f](https://sepolia.basesc
 
 ### mainnet
 
-MarketPlace: [0x1B0d0184bBB10ff31C1c3dc48224931E11fdac81](https://basescan.org/address/0x1b0d0184bbb10ff31c1c3dc48224931e11fdac81)
+MarketPlace: [0x0b8477a0b12073cfd2c3872bf6d65eabd7f0b205](https://basescan.org/address/0x0b8477a0b12073cfd2c3872bf6d65eabd7f0b205)
