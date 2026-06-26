@@ -21,6 +21,7 @@ contract MarketPlaceTest is Test {
     uint256 constant TOKEN_ID_2 = 2;
     uint256 constant AUCTION_DURATION = 2 hours;
     uint256 constant LISTING_PRICE = 100e6; // 100 USDC
+    uint16 constant MAX_FEE = 2_000; // MAX_PROTOCOL_FEE_BPS (20%)
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -86,7 +87,7 @@ contract MarketPlaceTest is Test {
         assertEq(mp.activeAuctionId(TOKEN_ID), 1);
         assertEq(nft.ownerOf(TOKEN_ID), address(mp));
 
-        (address seller,,, uint256 endTime, MarketPlace.AuctionState state) = mp.auctions(1);
+        (address seller,,, uint256 endTime, MarketPlace.AuctionState state,) = mp.auctions(1);
         assertEq(seller, alice);
         assertEq(endTime, block.timestamp + AUCTION_DURATION);
         assertEq(uint256(state), uint256(MarketPlace.AuctionState.Active));
@@ -134,7 +135,7 @@ contract MarketPlaceTest is Test {
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 5e6);
 
-        (, uint256 highestBid, address highestBidder,,) = mp.auctions(1);
+        (, uint256 highestBid, address highestBidder,,,) = mp.auctions(1);
         assertEq(highestBid, 5e6);
         assertEq(highestBidder, bob);
         assertEq(usdc.balanceOf(bob), 1000e6 - 5e6);
@@ -151,9 +152,17 @@ contract MarketPlaceTest is Test {
         vm.prank(charlie);
         mp.placeBid(TOKEN_ID, 10e6);
 
-        // bob should be refunded
+        // bob's refund is credited (pull-payment), not pushed
+        assertEq(usdc.balanceOf(bob), bobBalBefore);
+        assertEq(mp.pendingWithdrawals(bob), 5e6);
+
+        // bob withdraws
+        vm.prank(bob);
+        mp.withdraw();
         assertEq(usdc.balanceOf(bob), bobBalBefore + 5e6);
-        (, uint256 highestBid, address highestBidder,,) = mp.auctions(1);
+        assertEq(mp.pendingWithdrawals(bob), 0);
+
+        (, uint256 highestBid, address highestBidder,,,) = mp.auctions(1);
         assertEq(highestBid, 10e6);
         assertEq(highestBidder, charlie);
     }
@@ -168,7 +177,7 @@ contract MarketPlaceTest is Test {
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 6e6);
 
-        (, uint256 highestBid, address highestBidder,,) = mp.auctions(1);
+        (, uint256 highestBid, address highestBidder,,,) = mp.auctions(1);
         assertEq(highestBid, 11e6); // 5 + 6 stacked
         assertEq(highestBidder, bob);
     }
@@ -176,7 +185,7 @@ contract MarketPlaceTest is Test {
     function test_placeBid_extendsAuctionNearEnd() public {
         _createAuction();
 
-        (,,, uint256 endTimeBefore,) = mp.auctions(1);
+        (,,, uint256 endTimeBefore,,) = mp.auctions(1);
 
         // warp to within extension threshold (20 min default)
         vm.warp(endTimeBefore - 10 minutes);
@@ -184,19 +193,19 @@ contract MarketPlaceTest is Test {
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 5e6);
 
-        (,,, uint256 endTimeAfter,) = mp.auctions(1);
+        (,,, uint256 endTimeAfter,,) = mp.auctions(1);
         assertEq(endTimeAfter, endTimeBefore + mp.auctionDurationExtension());
     }
 
     function test_placeBid_doesNotExtendWhenFarFromEnd() public {
         _createAuction();
 
-        (,,, uint256 endTimeBefore,) = mp.auctions(1);
+        (,,, uint256 endTimeBefore,,) = mp.auctions(1);
 
         vm.prank(bob);
         mp.placeBid(TOKEN_ID, 5e6);
 
-        (,,, uint256 endTimeAfter,) = mp.auctions(1);
+        (,,, uint256 endTimeAfter,,) = mp.auctions(1);
         assertEq(endTimeAfter, endTimeBefore);
     }
 
@@ -265,11 +274,28 @@ contract MarketPlaceTest is Test {
 
         uint256 bobBefore = usdc.balanceOf(bob);
 
-        vm.prank(alice);
+        // once a bid exists, only a moderator may cancel (M-2)
+        vm.prank(moderator);
         mp.cancelAuction(TOKEN_ID);
 
+        // refund is credited via pull-payment
+        assertEq(usdc.balanceOf(bob), bobBefore);
+        assertEq(mp.pendingWithdrawals(bob), 10e6);
+
+        vm.prank(bob);
+        mp.withdraw();
         assertEq(usdc.balanceOf(bob), bobBefore + 10e6);
         assertEq(nft.ownerOf(TOKEN_ID), alice);
+    }
+
+    function test_cancelAuction_sellerCannotCancelWithBids() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(TOKEN_ID, 10e6);
+
+        vm.prank(alice);
+        vm.expectRevert("Cannot cancel auction with bids");
+        mp.cancelAuction(TOKEN_ID);
     }
 
     function test_cancelAuction_noBidsReturnsNft() public {
@@ -321,7 +347,10 @@ contract MarketPlaceTest is Test {
 
         // NFT goes to winner
         assertEq(nft.ownerOf(TOKEN_ID), bob);
-        // seller receives 90% (10% fee)
+        // seller proceeds credited via pull-payment (90% after 10% fee)
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+        vm.prank(alice);
+        mp.withdraw();
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         // protocol fee accrued
         assertEq(mp.feeAccrued(), 10e6);
@@ -376,7 +405,7 @@ contract MarketPlaceTest is Test {
         assertEq(mp.activeListingId(TOKEN_ID), 1);
         assertEq(nft.ownerOf(TOKEN_ID), address(mp));
 
-        (address seller,, uint256 price, MarketPlace.ListingState state) = mp.listings(1);
+        (address seller,, uint256 price, MarketPlace.ListingState state,) = mp.listings(1);
         assertEq(seller, alice);
         assertEq(price, LISTING_PRICE);
         assertEq(uint256(state), uint256(MarketPlace.ListingState.Active));
@@ -423,7 +452,10 @@ contract MarketPlaceTest is Test {
 
         // NFT to buyer
         assertEq(nft.ownerOf(TOKEN_ID), bob);
-        // seller gets 90 USDC (10% fee on 100)
+        // seller proceeds credited via pull-payment (90 USDC after 10% fee on 100)
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+        vm.prank(alice);
+        mp.withdraw();
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         // buyer paid 100 USDC
         assertEq(usdc.balanceOf(bob), bobBefore - LISTING_PRICE);
@@ -537,10 +569,10 @@ contract MarketPlaceTest is Test {
         assertEq(mp.protocolFeeBps(), 500);
     }
 
-    function test_setProtocolFee_revertsOver100() public {
+    function test_setProtocolFee_revertsOverMax() public {
         vm.prank(admin);
-        vm.expectRevert("Fee exceeds 100%");
-        mp.setProtocolFee(10_001);
+        vm.expectRevert("Fee exceeds maximum");
+        mp.setProtocolFee(2_001); // above MAX_PROTOCOL_FEE_BPS (20%)
     }
 
     function test_setAuctionMinBidAmount() public {
@@ -637,7 +669,11 @@ contract MarketPlaceTest is Test {
         vm.prank(charlie);
         mp.placeBid(TOKEN_ID, 100e6);
 
-        // Bob should have been refunded 50
+        // Bob's outbid refund is credited (pull-payment); claim it
+        assertEq(usdc.balanceOf(bob), 1000e6 - 50e6);
+        assertEq(mp.pendingWithdrawals(bob), 50e6);
+        vm.prank(bob);
+        mp.withdraw();
         assertEq(usdc.balanceOf(bob), 1000e6);
 
         // Fast-forward past end
@@ -650,7 +686,10 @@ contract MarketPlaceTest is Test {
 
         // Charlie wins NFT
         assertEq(nft.ownerOf(TOKEN_ID), charlie);
-        // Alice gets 90 USDC (100 - 10% fee)
+        // Alice's proceeds credited (100 - 10% fee); claim them
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+        vm.prank(alice);
+        mp.withdraw();
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         assertEq(mp.feeAccrued(), 10e6);
 
@@ -673,6 +712,10 @@ contract MarketPlaceTest is Test {
         mp.purchaseItem(TOKEN_ID);
 
         assertEq(nft.ownerOf(TOKEN_ID), bob);
+        // seller proceeds credited via pull-payment
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+        vm.prank(alice);
+        mp.withdraw();
         assertEq(usdc.balanceOf(alice), aliceBefore + 90e6);
         assertEq(mp.feeAccrued(), 10e6);
     }
@@ -704,6 +747,61 @@ contract MarketPlaceTest is Test {
         vm.prank(alice);
         mp.createAuction(TOKEN_ID, AUCTION_DURATION);
         assertEq(mp.auctionCounter(), 2);
+    }
+
+    // ==================== Withdraw (pull-payment) ====================
+
+    function test_withdraw_revertsNothingToWithdraw() public {
+        vm.prank(bob);
+        vm.expectRevert("Nothing to withdraw");
+        mp.withdraw();
+    }
+
+    function test_withdraw_emitsEvent() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(TOKEN_ID, 5e6);
+        vm.prank(charlie);
+        mp.placeBid(TOKEN_ID, 10e6);
+
+        vm.expectEmit(true, false, false, true);
+        emit MarketPlace.Withdrawal(bob, 5e6);
+        vm.prank(bob);
+        mp.withdraw();
+    }
+
+    // ==================== Fee snapshot (M-3) ====================
+
+    function test_feeSnapshot_listingUsesRateAtCreation() public {
+        // list at the default 10% fee
+        _createListing();
+
+        // admin lowers the fee afterwards; in-flight listing must keep its 10%
+        vm.prank(admin);
+        mp.setProtocolFee(0);
+
+        vm.prank(bob);
+        mp.purchaseItem(TOKEN_ID);
+
+        // fee charged is the snapshotted 10%, not the new 0%
+        assertEq(mp.feeAccrued(), 10e6);
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+    }
+
+    function test_feeSnapshot_auctionUsesRateAtCreation() public {
+        _createAuction();
+
+        // raise fee mid-auction; settlement must use the rate at creation (10%)
+        vm.prank(admin);
+        mp.setProtocolFee(MAX_FEE);
+
+        vm.prank(bob);
+        mp.placeBid(TOKEN_ID, 100e6);
+        vm.warp(block.timestamp + AUCTION_DURATION + 1);
+        mp.settleAuction(TOKEN_ID);
+
+        assertEq(mp.feeAccrued(), 10e6); // 10% snapshot, not 20%
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
     }
 
     // ==================== Helpers ====================

@@ -11,6 +11,8 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
     bytes32 public constant MODERATOR_ROLE = keccak256("MODERATOR_ROLE");
     /// @dev Basis points denominator (10,000 = 100%)
     uint16 internal constant BPS_DENOMINATOR = 10_000;
+    /// @dev Upper bound on the protocol fee (20%) to limit admin power over proceeds
+    uint16 internal constant MAX_PROTOCOL_FEE_BPS = 2_000;
 
     IERC20 public immutable USDC;
     ICollectibleCasts public immutable COLLECTIBLES;
@@ -44,6 +46,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         address highestBidder;
         uint256 endTime;
         AuctionState state;
+        uint16 feeBps;
     }
 
     struct Listing {
@@ -51,6 +54,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         address buyer;
         uint256 price;
         ListingState state;
+        uint16 feeBps;
     }
 
     uint256 public auctionCounter;
@@ -61,6 +65,9 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
     mapping(uint256 tokenId => bool) public isTokenOnSale;
     mapping(uint256 tokenId => uint256) public activeAuctionId;
     mapping(uint256 tokenId => uint256) public activeListingId;
+
+    /// @dev Pull-payment credits in USDC, claimed via withdraw()
+    mapping(address account => uint256) public pendingWithdrawals;
 
     modifier onlyMinted(uint256 tokenId) {
         _requireMinted(tokenId);
@@ -97,6 +104,9 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
     event ListingCreated(uint256 tokenId, uint256 listingId, address seller, uint256 price);
     event ListingPurchased(uint256 tokenId, uint256 listingId, uint256 endTime);
     event ListingCancelled(uint256 tokenId, uint256 listingId, uint256 endTime);
+
+    event PaymentCredited(address indexed account, uint256 amount);
+    event Withdrawal(address indexed account, address indexed receiver, uint256 amount);
 
     event ProtocolFeesCollected(uint256 amount, address receiver);
     event ProtocolFeeUpdated(uint256 oldValue, uint256 newValue);
@@ -136,7 +146,8 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
             highestBid: 0,
             highestBidder: address(0),
             endTime: block.timestamp + duration,
-            state: AuctionState.Active
+            state: AuctionState.Active,
+            feeBps: protocolFeeBps
         });
 
         _collectNft(tokenId, seller);
@@ -161,13 +172,14 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         // Effects: update state before external calls (CEI)
         address formerHighestBidder = auction.highestBidder;
         uint256 formerHighestBid = auction.highestBid;
+        uint256 amountToCollect = amount;
 
-        if (auction.highestBidder == bidder) {
-            auction.highestBid += amount;
+        if (formerHighestBidder == bidder) {
+            amountToCollect = amount - formerHighestBid;
         } else {
-            auction.highestBid = amount;
             auction.highestBidder = bidder;
         }
+        auction.highestBid = amount;
 
         // extend auction endtime if bid came in too late
         uint256 timeTillAuctionDeadline = expectedEndTime - block.timestamp;
@@ -176,10 +188,12 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         }
 
         // Interactions: external calls after state updates
-        _collectPayment(amount, bidder);
+        _collectPayment(amountToCollect, bidder);
 
         if (formerHighestBidder != bidder && formerHighestBidder != address(0) && formerHighestBid > 0) {
-            _pushPayment(formerHighestBidder, formerHighestBid);
+            // Pull-payment: credit the outbid bidder instead of pushing, so a
+            // non-receiving (e.g. USDC-blacklisted) prior bidder cannot freeze the auction.
+            _creditPayment(formerHighestBidder, formerHighestBid);
         }
 
         emit BidPlaced(tokenId, auctionId, bidder, amount);
@@ -191,12 +205,19 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         Auction storage auction = auctions[auctionId];
 
         require(auction.endTime > block.timestamp, "Auction already ended");
-        require(caller == auction.seller || hasRole(MODERATOR_ROLE, caller), "Not authorized");
 
         // cache values before state changes
         address highestBidder = auction.highestBidder;
         uint256 highestBid = auction.highestBid;
         address seller = auction.seller;
+
+        // Once a bid exists, the seller can no longer renege on the auction; only a
+        // moderator may cancel (abuse/emergency). Bid-free auctions remain seller-cancellable.
+        if (highestBidder != address(0)) {
+            require(hasRole(MODERATOR_ROLE, caller), "Cannot cancel auction with bids");
+        } else {
+            require(caller == seller || hasRole(MODERATOR_ROLE, caller), "Not authorized");
+        }
 
         // Effects: update state before external calls (CEI)
         auction.state = AuctionState.Cancelled;
@@ -204,9 +225,9 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         activeAuctionId[tokenId] = 0;
         isTokenOnSale[tokenId] = false;
 
-        // Interactions: return money to highest bidder
+        // Interactions: refund the highest bidder via pull-payment
         if (highestBidder != address(0) && highestBid > 0) {
-            _pushPayment(highestBidder, highestBid);
+            _creditPayment(highestBidder, highestBid);
         }
 
         // return NFT to seller
@@ -237,12 +258,13 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
             // send out NFT to highest bidder
             _pushNft(address(this), highestBidder, tokenId);
 
-            // push payment to seller (not bidder)
-            uint256 protocolFee = _calculatePercentageOf(highestBid, protocolFeeBps);
+            // settle to seller using the fee rate snapshotted at auction creation
+            uint256 protocolFee = _calculatePercentageOf(highestBid, auction.feeBps);
             uint256 amountToSettle = highestBid - protocolFee;
 
             feeAccrued += protocolFee;
-            _pushPayment(seller, amountToSettle);
+            // Pull-payment: credit the seller so a non-receiving seller cannot lock the NFT/bid.
+            _creditPayment(seller, amountToSettle);
         } else {
             // no bids — return NFT to seller
             _pushNft(address(this), seller, tokenId);
@@ -264,8 +286,9 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         isTokenOnSale[tokenId] = true;
         activeListingId[tokenId] = ++listingCounter;
 
-        listings[listingCounter] =
-            Listing({seller: seller, buyer: address(0), price: price, state: ListingState.Active});
+        listings[listingCounter] = Listing({
+            seller: seller, buyer: address(0), price: price, state: ListingState.Active, feeBps: protocolFeeBps
+        });
 
         // Interactions
         _collectNft(tokenId, seller);
@@ -284,6 +307,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
 
         uint256 price = listing.price;
         address seller = listing.seller;
+        uint16 feeBps = listing.feeBps;
 
         // Effects: update state before external calls (CEI)
         listing.buyer = buyer;
@@ -291,7 +315,8 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         activeListingId[tokenId] = 0;
         isTokenOnSale[tokenId] = false;
 
-        uint256 protocolFee = _calculatePercentageOf(price, protocolFeeBps);
+        // use the fee rate snapshotted at listing creation
+        uint256 protocolFee = _calculatePercentageOf(price, feeBps);
         uint256 amountToSettle = price - protocolFee;
         feeAccrued += protocolFee;
 
@@ -299,8 +324,8 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         _collectPayment(price, buyer);
         _pushNft(address(this), buyer, tokenId);
 
-        // push payment to seller (not buyer)
-        _pushPayment(seller, amountToSettle);
+        // Pull-payment: credit the seller (not buyer)
+        _creditPayment(seller, amountToSettle);
 
         emit ListingPurchased(tokenId, listingId, endTime);
     }
@@ -334,6 +359,27 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
         require(USDC.transfer(receiver, amount), "Failed to push payment");
     }
 
+    /// @dev Records USDC owed to an account for later withdrawal (pull-payment).
+    function _creditPayment(address account, uint256 amount) internal {
+        if (amount == 0) return;
+        pendingWithdrawals[account] += amount;
+        emit PaymentCredited(account, amount);
+    }
+
+    /// @notice Withdraw USDC owed to the caller from settled sales, refunds, or cancellations.
+    function withdraw(address receiver) external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "Nothing to withdraw");
+
+        // Effects: zero out before transfer (CEI)
+        pendingWithdrawals[msg.sender] = 0;
+
+        // Interactions
+        require(USDC.transfer(receiver, amount), "Failed to withdraw");
+
+        emit Withdrawal(msg.sender, receiver, amount);
+    }
+
     function _collectNft(uint256 tokenId, address owner) internal {
         COLLECTIBLES.safeTransferFrom(owner, address(this), tokenId);
     }
@@ -364,7 +410,7 @@ contract MarketPlace is AccessControl, ReentrancyGuard, ERC721Holder {
     }
 
     function setProtocolFee(uint16 protocolFeeBps_) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(protocolFeeBps_ <= BPS_DENOMINATOR, "Fee exceeds 100%");
+        require(protocolFeeBps_ <= MAX_PROTOCOL_FEE_BPS, "Fee exceeds maximum");
         uint16 oldValue = protocolFeeBps;
         protocolFeeBps = protocolFeeBps_;
 
