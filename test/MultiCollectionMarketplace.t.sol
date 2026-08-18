@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {MultiCollectionMarketplace as Marketplace} from "../src/MultiCollectionMarketplace.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockRevertingUSDC} from "./mocks/MockRevertingUSDC.sol";
@@ -86,10 +87,14 @@ contract MultiCollectionMarketplaceTest is Test {
 
     function test_constructor_setsImmutables() public view {
         assertEq(address(mp.USDC()), address(usdc));
+        assertEq(mp.usdcDecimals(), 6);
+        assertEq(mp.auctionMinBidIncrementAmount(), 1e6);
         assertEq(mp.auctionMinBidAmount(), 1e6);
+        assertEq(uint256(mp.auctionMinBidIncrementBps()), 1_000);
         assertEq(uint256(mp.protocolFeeBps()), 1_000);
         assertTrue(mp.hasRole(mp.DEFAULT_ADMIN_ROLE(), admin));
         assertTrue(mp.hasRole(mp.MODERATOR_ROLE(), admin));
+        assertFalse(mp.paused());
     }
 
     function test_constructor_addsInitialCollection() public view {
@@ -428,6 +433,151 @@ contract MultiCollectionMarketplaceTest is Test {
         vm.prank(bob);
         vm.expectRevert(Marketplace.TokenNotOnSale.selector);
         mp.placeBid(COLLECTION_A, TOKEN_ID, 5e6);
+    }
+
+    // ==================== Auction: Bid increment (fixed $1 or 10%) ====================
+
+    function test_bidIncrement_initialBidAtMinimumSucceeds() public {
+        _createAuction();
+
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 1e6);
+
+        (, uint256 highestBid,,,,) = mp.auctions(1);
+        assertEq(highestBid, 1e6);
+    }
+
+    function test_bidIncrement_initialBidBelowMinimumReverts() public {
+        _createAuction();
+
+        vm.prank(bob);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 1e6 - 1);
+    }
+
+    function test_bidIncrement_table() public {
+        // highestBid => minimum next bid (in USDC base units)
+        uint256[2][7] memory cases = [
+            [uint256(1e6), uint256(2e6)],
+            [uint256(5e6), uint256(6e6)],
+            [uint256(9e6), uint256(10e6)],
+            [uint256(10e6), uint256(11e6)],
+            [uint256(20e6), uint256(22e6)],
+            [uint256(50e6), uint256(55e6)],
+            [uint256(100e6), uint256(110e6)]
+        ];
+
+        uint256 tokenId = 10;
+        for (uint256 i = 0; i < cases.length; i++) {
+            nftA.mint(alice, tokenId);
+            _assertNextMinimum(tokenId, cases[i][0], cases[i][1]);
+            tokenId++;
+        }
+    }
+
+    function test_bidIncrement_tenPercentAppliesAboveTenUsdc() public {
+        // At 11 USDC the 10% (1.1 USDC) exceeds the fixed $1, so min next = 12.1 USDC.
+        nftA.mint(alice, 100);
+        vm.prank(alice);
+        mp.createAuction(COLLECTION_A, 100, AUCTION_DURATION);
+
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, 100, 11e6);
+
+        vm.prank(charlie);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, 100, 12e6);
+
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, 100, 12_100_000);
+    }
+
+    function test_bidIncrement_customMinBidAmountAppliesToInitialBidOnly() public {
+        vm.prank(admin);
+        mp.setAuctionMinBidAmount(5e6);
+        _createAuction();
+
+        // First bid must meet the configured minimum (no accidental +10%).
+        vm.prank(bob);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 1e6);
+
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 5e6);
+    }
+
+    function test_bidIncrement_ignoresMinBidAmountForLaterBids() public {
+        vm.prank(admin);
+        mp.setAuctionMinBidAmount(20e6);
+        _createAuction();
+
+        // First bid at the raised minimum.
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 20e6);
+
+        // Later bids use max($1, 10%) of the highest bid, not the raised floor:
+        // minimum next = 20e6 + max(1e6, 2e6) = 22e6. A 21e6 bid must revert.
+        vm.prank(charlie);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 21e6);
+
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 22e6);
+    }
+
+    // ==================== Auction: Increment percentage config ====================
+
+    function test_setAuctionMinBidIncrementBps_success() public {
+        vm.expectEmit(true, true, true, true);
+        emit Marketplace.AuctionMinBidIncrementBpsUpdated(1_000, 2_000);
+        vm.prank(admin);
+        mp.setAuctionMinBidIncrementBps(2_000);
+
+        assertEq(uint256(mp.auctionMinBidIncrementBps()), 2_000);
+    }
+
+    function test_setAuctionMinBidIncrementBps_revertsOver100Percent() public {
+        vm.prank(admin);
+        vm.expectRevert(Marketplace.IncrementTooHigh.selector);
+        mp.setAuctionMinBidIncrementBps(10_001);
+    }
+
+    function test_setAuctionMinBidIncrementBps_revertsNonAdmin() public {
+        vm.prank(bob);
+        vm.expectRevert();
+        mp.setAuctionMinBidIncrementBps(2_000);
+    }
+
+    function test_bidIncrement_usesConfiguredPercentage() public {
+        vm.prank(admin);
+        mp.setAuctionMinBidIncrementBps(2_000); // 20%
+
+        nftA.mint(alice, 200);
+        vm.prank(alice);
+        mp.createAuction(COLLECTION_A, 200, AUCTION_DURATION);
+
+        // First bid at the fixed $1 floor.
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, 200, 1e6);
+
+        // 20% of 1 USDC (0.2) < $1, so the $1 floor still applies: min next = 2 USDC.
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, 200, 2e6);
+
+        // At 100 USDC, 20% (20 USDC) exceeds $1: min next = 120 USDC.
+        nftA.mint(alice, 201);
+        vm.prank(alice);
+        mp.createAuction(COLLECTION_A, 201, AUCTION_DURATION);
+
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, 201, 100e6);
+
+        vm.prank(charlie);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, 201, 110e6);
+
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, 201, 120e6);
     }
 
     // ==================== Auction: Cancel ====================
@@ -983,6 +1133,184 @@ contract MultiCollectionMarketplaceTest is Test {
         assertEq(mp.pendingWithdrawals(alice), 90e6);
     }
 
+    // ==================== Pause: control ====================
+
+    function test_pause_admin() public {
+        vm.expectEmit(true, true, true, true);
+        emit Pausable.Paused(admin);
+        vm.prank(admin);
+        mp.pause();
+        assertTrue(mp.paused());
+    }
+
+    function test_pause_revertsNonAdmin() public {
+        vm.prank(bob);
+        vm.expectRevert();
+        mp.pause();
+        assertFalse(mp.paused());
+    }
+
+    function test_unpause_admin() public {
+        vm.prank(admin);
+        mp.pause();
+
+        vm.expectEmit(true, true, true, true);
+        emit Pausable.Unpaused(admin);
+        vm.prank(admin);
+        mp.unpause();
+        assertFalse(mp.paused());
+    }
+
+    function test_unpause_revertsNonAdmin() public {
+        _pause();
+
+        vm.prank(bob);
+        vm.expectRevert();
+        mp.unpause();
+        assertTrue(mp.paused());
+    }
+
+    function test_pause_revertsWhenAlreadyPaused() public {
+        _pause();
+
+        vm.prank(admin);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        mp.pause();
+    }
+
+    function test_unpause_revertsWhenNotPaused() public {
+        vm.prank(admin);
+        vm.expectRevert(Pausable.ExpectedPause.selector);
+        mp.unpause();
+    }
+
+    // ==================== Pause: new activity blocked ====================
+
+    function test_createListing_revertsWhenPaused() public {
+        _pause();
+
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        mp.createListing(COLLECTION_A, TOKEN_ID, LISTING_PRICE);
+    }
+
+    function test_purchaseItem_revertsWhenPaused() public {
+        _createListing();
+        _pause();
+
+        vm.prank(bob);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        mp.purchaseItem(COLLECTION_A, TOKEN_ID);
+    }
+
+    function test_createAuction_revertsWhenPaused() public {
+        _pause();
+
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        mp.createAuction(COLLECTION_A, TOKEN_ID, AUCTION_DURATION);
+    }
+
+    function test_placeBid_revertsWhenPaused() public {
+        _createAuction();
+        _pause();
+
+        vm.prank(bob);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 5e6);
+    }
+
+    // ==================== Pause: recovery still available ====================
+
+    function test_cancelListing_worksWhilePaused() public {
+        _createListing();
+        _pause();
+
+        vm.prank(alice);
+        mp.cancelListing(COLLECTION_A, TOKEN_ID);
+
+        assertFalse(mp.isTokenOnSale(COLLECTION_A, TOKEN_ID));
+        assertEq(nftA.ownerOf(TOKEN_ID), alice);
+    }
+
+    function test_cancelAuction_worksWhilePaused() public {
+        _createAuction();
+        _pause();
+
+        vm.prank(alice);
+        mp.cancelAuction(COLLECTION_A, TOKEN_ID);
+
+        assertFalse(mp.isTokenOnSale(COLLECTION_A, TOKEN_ID));
+        assertEq(nftA.ownerOf(TOKEN_ID), alice);
+    }
+
+    function test_cancelAuction_refundsBidderWhilePaused() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 10e6);
+        _pause();
+
+        vm.prank(moderator);
+        mp.cancelAuction(COLLECTION_A, TOKEN_ID);
+
+        assertEq(mp.pendingWithdrawals(bob), 10e6);
+        assertEq(nftA.ownerOf(TOKEN_ID), alice);
+    }
+
+    function test_settleAuction_worksWhilePaused() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 100e6);
+        vm.warp(block.timestamp + AUCTION_DURATION + 1);
+        _pause();
+
+        mp.settleAuction(COLLECTION_A, TOKEN_ID);
+
+        assertEq(nftA.ownerOf(TOKEN_ID), bob);
+        assertEq(mp.pendingWithdrawals(alice), 90e6);
+    }
+
+    function test_withdraw_worksWhilePaused() public {
+        _createAuction();
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 5e6);
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, TOKEN_ID, 10e6);
+        _pause();
+
+        vm.prank(bob);
+        mp.withdraw(bob);
+
+        assertEq(mp.pendingWithdrawals(bob), 0);
+        assertEq(usdc.balanceOf(bob), 1000e6);
+    }
+
+    function test_collectProtocolFees_worksWhilePaused() public {
+        _buy();
+        _pause();
+
+        address treasury = makeAddr("treasury");
+        uint256 fees = mp.feeAccrued();
+        vm.prank(admin);
+        mp.collectProtocolFees(treasury);
+
+        assertEq(usdc.balanceOf(treasury), fees);
+        assertEq(mp.feeAccrued(), 0);
+    }
+
+    function test_unpause_restoresFunctionality() public {
+        _pause();
+        vm.prank(admin);
+        mp.unpause();
+
+        _createListing();
+        assertTrue(mp.isTokenOnSale(COLLECTION_A, TOKEN_ID));
+
+        vm.prank(bob);
+        mp.purchaseItem(COLLECTION_A, TOKEN_ID);
+        assertEq(nftA.ownerOf(TOKEN_ID), bob);
+    }
+
     // ==================== Helpers ====================
 
     function _createAuction() internal {
@@ -999,5 +1327,35 @@ contract MultiCollectionMarketplaceTest is Test {
         _createListing();
         vm.prank(bob);
         mp.purchaseItem(COLLECTION_A, TOKEN_ID);
+    }
+
+    function _pause() internal {
+        vm.prank(admin);
+        mp.pause();
+    }
+
+    function _assertNextMinimum(uint256 tokenId, uint256 highest, uint256 minimumNext) internal {
+        vm.prank(alice);
+        mp.createAuction(COLLECTION_A, tokenId, AUCTION_DURATION);
+
+        vm.prank(bob);
+        mp.placeBid(COLLECTION_A, tokenId, highest);
+
+        // One base unit below the required minimum must revert.
+        vm.prank(charlie);
+        vm.expectRevert(Marketplace.BidTooLow.selector);
+        mp.placeBid(COLLECTION_A, tokenId, minimumNext - 1);
+
+        // The exact minimum must succeed.
+        vm.prank(charlie);
+        mp.placeBid(COLLECTION_A, tokenId, minimumNext);
+
+        uint256 auctionId = mp.activeAuctionId(COLLECTION_A, tokenId);
+        (, uint256 newHighest,,,,) = mp.auctions(auctionId);
+        assertEq(newHighest, minimumNext);
+
+        // Free the token for the next case by settling.
+        vm.warp(block.timestamp + AUCTION_DURATION + 1);
+        mp.settleAuction(COLLECTION_A, tokenId);
     }
 }

@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
@@ -22,8 +23,19 @@ import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Hol
  *   strand existing marketplace positions.
  * - USDC proceeds and refunds use pull payments.
  * - Protocol fees are snapshotted when a listing/auction is created.
+ * - The marketplace can be paused as an emergency stop.
+ *
+ * @dev Pause design (emergency stop):
+ * - Only the DEFAULT_ADMIN_ROLE can pause/unpause.
+ * - Pausing blocks NEW marketplace activity: creating listings, purchasing,
+ *   creating auctions, and placing bids.
+ * - Pausing does NOT block the ability to resolve existing positions and
+ *   recover assets: cancelling listings/auctions, settling ended auctions,
+ *   withdrawing pull payments, and collecting protocol fees all remain
+ *   callable while paused. This mirrors the "deactivated collection"
+ *   behavior: no new positions, but existing ones are never stranded.
  */
-contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Holder {
+contract MultiCollectionMarketplace is AccessControl, Pausable, ReentrancyGuard, ERC721Holder {
     // =============================================================
     //                           ROLES
     // =============================================================
@@ -45,6 +57,13 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
     // =============================================================
 
     IERC20 public immutable USDC;
+
+    /// @dev USDC decimals on the target chain (e.g. 6 on most chains).
+    uint256 public immutable usdcDecimals;
+
+    /// @dev Fixed minimum bid increment in USDC base units (1 USDC).
+    ///      Applied as a floor against the 10% increment for later bids.
+    uint256 public immutable auctionMinBidIncrementAmount;
 
     // =============================================================
     //                          COLLECTIONS
@@ -309,14 +328,43 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
 
         USDC = IERC20(usdc_);
 
+        usdcDecimals = usdcDecimals_;
+
+        auctionMinBidIncrementAmount = 1 * 10 ** usdcDecimals_;
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(MODERATOR_ROLE, admin_);
 
-        auctionMinBidAmount = 1 * 10 ** usdcDecimals_;
+        auctionMinBidAmount = auctionMinBidIncrementAmount;
 
         if (initialCollection_ != address(0)) {
             _addCollection(initialCollection_);
         }
+    }
+
+    // =============================================================
+    //                     EMERGENCY PAUSE
+    // =============================================================
+
+    /**
+     * @notice Pause all new marketplace activity.
+     *
+     * @dev
+     * Only the DEFAULT_ADMIN_ROLE may pause. While paused, creating
+     * listings, purchasing, creating auctions, and placing bids revert
+     * with EnforcedPause. Recovery operations (cancels, settles,
+     * withdrawals, fee collection) remain available so user funds and
+     * NFTs are never locked.
+     */
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Resume normal marketplace operation.
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
     }
 
     // =============================================================
@@ -429,6 +477,7 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
      */
     function createAuction(uint256 collectionId, uint256 tokenId, uint256 duration)
         external
+        whenNotPaused
         onlyActiveCollection(collectionId)
         onlyNotOnSale(collectionId, tokenId)
         nonReentrant
@@ -467,6 +516,7 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
      */
     function placeBid(uint256 collectionId, uint256 tokenId, uint256 amount)
         external
+        whenNotPaused
         onlyOnSale(collectionId, tokenId)
         nonReentrant
     {
@@ -484,11 +534,7 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
             revert AuctionAlreadyEnded();
         }
 
-        uint256 minimumBid = auction.highestBid + _calculatePercentageOf(auction.highestBid, auctionMinBidIncrementBps);
-
-        if (minimumBid < auctionMinBidAmount) {
-            minimumBid = auctionMinBidAmount;
-        }
+        uint256 minimumBid = _getMinimumNextBid(auction.highestBid);
 
         if (amount < minimumBid) {
             revert BidTooLow();
@@ -651,6 +697,7 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
      */
     function createListing(uint256 collectionId, uint256 tokenId, uint256 price)
         external
+        whenNotPaused
         onlyActiveCollection(collectionId)
         onlyNotOnSale(collectionId, tokenId)
         nonReentrant
@@ -680,6 +727,7 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
      */
     function purchaseItem(uint256 collectionId, uint256 tokenId)
         external
+        whenNotPaused
         onlyOnSale(collectionId, tokenId)
         nonReentrant
     {
@@ -834,6 +882,30 @@ contract MultiCollectionMarketplace is AccessControl, ReentrancyGuard, ERC721Hol
         }
 
         return (value * percentageBps) / BPS_DENOMINATOR;
+    }
+
+    /**
+     * @dev Returns the minimum bid required to top the current highest bid.
+     *
+     * - No bids yet: the configured auctionMinBidAmount (1 USDC by default).
+     * - Otherwise: highestBid + max(fixed $1 increment, auctionMinBidIncrementBps
+     *   of highestBid).
+     *
+     * The fixed $1 increment (auctionMinBidIncrementAmount) is expressed in
+     * USDC base units. The percentage increment defaults to 10% and can be
+     * adjusted by the DEFAULT_ADMIN_ROLE.
+     */
+    function _getMinimumNextBid(uint256 highestBid) internal view returns (uint256) {
+        if (highestBid == 0) {
+            return auctionMinBidAmount;
+        }
+
+        uint256 percentIncrement = _calculatePercentageOf(highestBid, auctionMinBidIncrementBps);
+
+        uint256 increment =
+            percentIncrement > auctionMinBidIncrementAmount ? percentIncrement : auctionMinBidIncrementAmount;
+
+        return highestBid + increment;
     }
 
     // =============================================================
